@@ -14,7 +14,7 @@
 //! `N`, and the file then starts at byte 64 with a derived initial state.
 
 use super::sha256_core::{compress, iv_std, length_padding_blocks, BLOCK_SIZE, STATE_SIZE};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// A 32-byte checkpoint padded into a full block, mirroring SHA-256's own
 /// bit-padding convention.
@@ -340,6 +340,184 @@ pub fn verify_proof(
 
     let pad = length_padding_blocks(frame.hashed_len(n));
     let mut fstate = raw_state;
+    for blk in pad.chunks(BLOCK_SIZE) {
+        fstate = compress(&fstate, blk);
+    }
+    &fstate == digest
+}
+
+// ---------------------------------------------------------------------------
+// Batched openings
+// ---------------------------------------------------------------------------
+
+/// Several elements opened at once, carrying each shared reveal only
+/// where the recursion actually needs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MultiProof {
+    /// Pair start -> the two data blocks of that pair.
+    pub pairs: BTreeMap<usize, (Vec<u8>, Vec<u8>)>,
+    pub reveals: Vec<[u8; STATE_SIZE]>,
+}
+
+impl MultiProof {
+    pub fn nbytes(&self) -> usize {
+        2 * BLOCK_SIZE * self.pairs.len() + STATE_SIZE * self.reveals.len()
+    }
+}
+
+fn split(a: usize, k: u32, s: &[usize]) -> (Vec<usize>, Vec<usize>) {
+    let h = 1usize << (k - 1);
+    (
+        s.iter().copied().filter(|x| *x < a + h).collect(),
+        s.iter().copied().filter(|x| *x >= a + h).collect(),
+    )
+}
+
+pub fn build_multiproof(sf: &StructuredFile, indices: &[usize]) -> MultiProof {
+    let l = sf.levels;
+    let starts: BTreeSet<usize> = indices.iter().map(|i| i - (i % 2)).collect();
+    let mut mp = MultiProof {
+        pairs: starts
+            .iter()
+            .map(|s| (*s, (sf.elements[*s].clone(), sf.elements[s + 1].clone())))
+            .collect(),
+        reveals: Vec::new(),
+    };
+
+    fn rec(sf: &StructuredFile, mp: &mut MultiProof, a: usize, k: u32, s: &[usize]) {
+        if k == 1 {
+            return;
+        }
+        let h = 1usize << (k - 1);
+        let (sl, sr) = split(a, k, s);
+        if !sl.is_empty() && !sr.is_empty() {
+            rec(sf, mp, a, k - 1, &sl);
+            rec(sf, mp, a + h, k - 1, &sr);
+        } else if !sl.is_empty() {
+            rec(sf, mp, a, k - 1, &sl);
+            mp.reveals.push(sf.prewrap[&(a + h, k - 1)]);
+        } else {
+            mp.reveals.push(sf.ending[&(a, k - 1)]);
+            rec(sf, mp, a + h, k - 1, &sr);
+        }
+    }
+
+    let h_top = 1usize << (l - 1);
+    let p: Vec<usize> = starts.iter().copied().collect();
+    let (pl, pr): (Vec<usize>, Vec<usize>) = p.iter().partition(|s| **s < h_top);
+    if !pl.is_empty() && !pr.is_empty() {
+        rec(sf, &mut mp, 0, l - 1, &pl);
+        rec(sf, &mut mp, h_top, l - 1, &pr);
+    } else if !pl.is_empty() {
+        rec(sf, &mut mp, 0, l - 1, &pl);
+        mp.reveals.push(sf.prewrap[&(h_top, l - 1)]);
+    } else {
+        mp.reveals.push(sf.ending[&(0, l - 1)]);
+        rec(sf, &mut mp, h_top, l - 1, &pr);
+    }
+    mp
+}
+
+/// Verify a batched opening.
+///
+/// The pair starts are derived from the verifier's own claims, never
+/// from the proof: a proof that opens pairs the verifier did not ask
+/// about is rejected rather than evaluated.
+pub fn verify_multiproof(
+    n: usize,
+    digest: &[u8; STATE_SIZE],
+    claims: &BTreeMap<usize, Vec<u8>>,
+    mp: &MultiProof,
+    frame: &Frame,
+) -> bool {
+    if n < MIN_ELEMENTS || !n.is_power_of_two() || claims.is_empty() {
+        return false;
+    }
+    let l = n.trailing_zeros();
+    if claims.keys().any(|t| *t >= n) {
+        return false;
+    }
+    let starts: BTreeSet<usize> = claims.keys().map(|t| t - (t % 2)).collect();
+    if mp.pairs.keys().copied().collect::<BTreeSet<_>>() != starts {
+        return false;
+    }
+    for (t, data) in claims {
+        let (d0, d1) = &mp.pairs[&(t - (t % 2))];
+        if d0.len() != BLOCK_SIZE || d1.len() != BLOCK_SIZE {
+            return false;
+        }
+        let want = if t % 2 == 0 { d0 } else { d1 };
+        if &pad_element(data) != want {
+            return false;
+        }
+    }
+
+    let mut it = mp.reveals.iter();
+
+    fn ev(
+        mp: &MultiProof,
+        it: &mut std::slice::Iter<'_, [u8; STATE_SIZE]>,
+        a: usize,
+        k: u32,
+        s: &[usize],
+        ckpt: &[u8; STATE_SIZE],
+    ) -> Option<[u8; STATE_SIZE]> {
+        if k == 1 {
+            let (d0, d1) = mp.pairs.get(&a)?;
+            let x = compress(&compress(&compress(ckpt, d0), d1), &mid_block(ckpt));
+            return Some(x);
+        }
+        let h = 1usize << (k - 1);
+        let (sl, sr) = split(a, k, s);
+        let right_end = if !sl.is_empty() && !sr.is_empty() {
+            let left_end = ev(mp, it, a, k - 1, &sl, ckpt)?;
+            ev(mp, it, a + h, k - 1, &sr, &left_end)?
+        } else if !sl.is_empty() {
+            let left_end = ev(mp, it, a, k - 1, &sl, ckpt)?;
+            compress(it.next()?, &mid_block(&left_end))
+        } else {
+            let left_end = *it.next()?;
+            ev(mp, it, a + h, k - 1, &sr, &left_end)?
+        };
+        Some(compress(&right_end, &mid_block(ckpt)))
+    }
+
+    let h_top = 1usize << (l - 1);
+    let p: Vec<usize> = starts.iter().copied().collect();
+    let (pl, pr): (Vec<usize>, Vec<usize>) = p.iter().partition(|s| **s < h_top);
+    let raw = if !pl.is_empty() && !pr.is_empty() {
+        match ev(mp, &mut it, 0, l - 1, &pl, &frame.iv())
+            .and_then(|left| ev(mp, &mut it, h_top, l - 1, &pr, &left))
+        {
+            Some(r) => r,
+            None => return false,
+        }
+    } else if !pl.is_empty() {
+        let y = match ev(mp, &mut it, 0, l - 1, &pl, &frame.iv()) {
+            Some(y) => y,
+            None => return false,
+        };
+        match it.next() {
+            Some(r) => compress(r, &mid_block(&y)),
+            None => return false,
+        }
+    } else {
+        let seed = match it.next() {
+            Some(r) => *r,
+            None => return false,
+        };
+        match ev(mp, &mut it, h_top, l - 1, &pr, &seed) {
+            Some(r) => r,
+            None => return false,
+        }
+    };
+
+    if it.next().is_some() {
+        return false;
+    }
+
+    let pad = length_padding_blocks(frame.hashed_len(n));
+    let mut fstate = raw;
     for blk in pad.chunks(BLOCK_SIZE) {
         fstate = compress(&fstate, blk);
     }

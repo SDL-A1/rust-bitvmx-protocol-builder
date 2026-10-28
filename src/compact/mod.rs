@@ -9,6 +9,7 @@ pub mod commitment;
 pub mod dispute;
 pub mod flatmerkle;
 pub mod graph;
+pub mod memory;
 pub mod messages;
 pub mod search;
 pub mod sha256_core;
