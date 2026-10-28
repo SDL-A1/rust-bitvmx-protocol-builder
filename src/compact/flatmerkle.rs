@@ -51,7 +51,11 @@ impl Frame {
     }
 
     pub fn new(prefix: Vec<u8>) -> Self {
-        assert_eq!(prefix.len(), BLOCK_SIZE, "a frame prefix is exactly one block");
+        assert_eq!(
+            prefix.len(),
+            BLOCK_SIZE,
+            "a frame prefix is exactly one block"
+        );
         Frame { prefix }
     }
 
@@ -76,7 +80,10 @@ pub const MIN_ELEMENTS: usize = 4;
 /// needs in order to reconstruct the finalization padding without seeing
 /// the file.
 pub fn total_raw_len(n: usize) -> usize {
-    assert!(n.is_power_of_two() && n >= MIN_ELEMENTS, "N must be a power of two, at least {MIN_ELEMENTS}");
+    assert!(
+        n.is_power_of_two() && n >= MIN_ELEMENTS,
+        "N must be a power of two, at least {MIN_ELEMENTS}"
+    );
     (2 * n - 2) * BLOCK_SIZE
 }
 
@@ -160,7 +167,10 @@ pub fn build(elements: &[Vec<u8>], frame: Frame) -> StructuredFile {
     };
 
     {
-        let mut b = Builder { sf: &mut sf, state: iv };
+        let mut b = Builder {
+            sf: &mut sf,
+            state: iv,
+        };
         b.block(0, levels - 1);
         b.block(1usize << (levels - 1), levels - 1);
         let end = b.state;

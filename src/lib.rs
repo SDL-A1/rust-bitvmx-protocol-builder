@@ -1,6 +1,6 @@
 pub mod builder;
-pub mod compact;
 pub mod cli;
+pub mod compact;
 pub mod config;
 pub mod errors;
 pub mod graph;

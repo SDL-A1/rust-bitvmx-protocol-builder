@@ -226,7 +226,9 @@ mod tests {
         // compact_size(len) || 0x50 || .. in front of the file, which moves
         // every block boundary inside it.
         let n = 64;
-        let elements: Vec<Vec<u8>> = (0..n).map(|i| vec![((i * 7 + 1) & 0xFF) as u8; 64]).collect();
+        let elements: Vec<Vec<u8>> = (0..n)
+            .map(|i| vec![((i * 7 + 1) & 0xFF) as u8; 64])
+            .collect();
         let bare = build(&elements, Frame::standalone());
         let framed = build(&elements, annex_frame(n));
         let a = annex_bytes(&framed);
@@ -248,7 +250,10 @@ mod tests {
             // the derived iv is C(IV, prefix): no publisher input anywhere
             assert_eq!(annex_frame(n).iv(), compress(&iv_std(), &pre));
             // and the compact size in the prefix is the real annex length
-            assert_eq!(&pre[..compact_size(annex_len(n)).len()], &compact_size(annex_len(n))[..]);
+            assert_eq!(
+                &pre[..compact_size(annex_len(n)).len()],
+                &compact_size(annex_len(n))[..]
+            );
         }
     }
 
@@ -280,8 +285,9 @@ mod tests {
     #[test]
     fn a_single_flipped_byte_moves_the_commitment() {
         let n = 64;
-        let mut elements: Vec<Vec<u8>> =
-            (0..n).map(|i| vec![((i * 7 + 1) & 0xFF) as u8; 64]).collect();
+        let mut elements: Vec<Vec<u8>> = (0..n)
+            .map(|i| vec![((i * 7 + 1) & 0xFF) as u8; 64])
+            .collect();
         let before = build(&elements, annex_frame(n)).digest;
         elements[31][0] ^= 1;
         let after = build(&elements, annex_frame(n)).digest;
@@ -413,7 +419,9 @@ mod witness_accounting {
     use bitcoin::Witness;
 
     fn publication_annex(n: usize) -> Vec<u8> {
-        let elements: Vec<Vec<u8>> = (0..n).map(|i| vec![((i * 7 + 1) & 0xFF) as u8; 64]).collect();
+        let elements: Vec<Vec<u8>> = (0..n)
+            .map(|i| vec![((i * 7 + 1) & 0xFF) as u8; 64])
+            .collect();
         annex_bytes(&build(&elements, annex_frame(n)))
     }
 

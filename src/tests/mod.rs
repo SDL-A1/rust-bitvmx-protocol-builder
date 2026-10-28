@@ -1,8 +1,8 @@
 pub mod autovalues_fees_test;
 pub mod builder_connection_test;
-pub mod compact_test;
 pub mod builder_outputs_test;
 pub mod builder_persistance_test;
+pub mod compact_test;
 pub mod graph_test;
 pub mod input_test;
 pub mod ots_checksig;
