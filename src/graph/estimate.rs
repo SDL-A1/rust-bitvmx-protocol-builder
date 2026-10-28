@@ -125,7 +125,10 @@ fn estimate_input_witness_bytes(
             }
 
             if annex_len > 0 {
-                max_size += witness_item_overhead(annex_len) + usize::from(annex_len > 0);
+                // One more witness item.  The item count's own compact size
+                // does not grow with it below 253 items, so the annex costs
+                // its length plus its own length prefix, and nothing else.
+                max_size += witness_item_overhead(annex_len);
             }
 
             max_size

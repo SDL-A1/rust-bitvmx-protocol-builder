@@ -60,6 +60,9 @@ pub enum GraphError {
     #[error("Invalid signature index: {0}")]
     InvalidSignatureIndex(usize),
 
+    #[error("Invalid annex: a BIP341 annex must begin with the 0x50 prefix byte")]
+    InvalidAnnex,
+
     #[error("Insufficient funds: total amount {0} is less than subtracted amount {1}")]
     InsufficientFunds(u64, u64),
 
