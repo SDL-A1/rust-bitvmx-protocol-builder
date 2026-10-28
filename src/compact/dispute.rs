@@ -1,0 +1,229 @@
+//! The publication disputes, M1 to M6.
+//!
+//! None of them demands an answer: in every case the party that alleges
+//! the fault is the party that holds the evidence, so a publication
+//! dispute is one transaction carrying its own refutation and it decides
+//! when it confirms.  Nothing here is settled by a timeout, which matters
+//! because a timeout decides against whoever is slow rather than against
+//! whoever is wrong.
+//!
+//! M1 is not re-derived here: refuting a file that is not a canonical
+//! FlatMerkle file is paper 1's malformation proof, and the guarantee it
+//! rests on -- that for *every* byte string an honest opponent can prove
+//! either an inclusion or a malformation -- is inherited, not rebuilt.
+
+use super::commitment::{final_block, PROFILE_BITCOUNT, WINDOW_LEN};
+use super::flatmerkle::{verify_proof, Frame, Proof};
+use super::messages::MCode;
+use super::sha256_core::{compress, STATE_SIZE};
+use super::tracetree::{child_position, Node, NODE_BYTES, NODE_OFFSET};
+use bitcoin::secp256k1::{schnorr, Message, Secp256k1, Verification, XOnlyPublicKey};
+
+// ---------------------------------------------------------------------
+// M5 and M6: what profile did the publisher actually sign?
+// ---------------------------------------------------------------------
+
+/// The profile witness: the publisher's own signature, and the tail of
+/// the message it signed.
+///
+/// The disputer cannot have invented this -- it cannot forge under the
+/// publisher's key -- so if the signature verifies, the length field and
+/// the window are the real ones.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileWitness {
+    pub signature: [u8; 64],
+    /// The chaining state before the final block.
+    pub h192: [u8; STATE_SIZE],
+    /// The thirty bytes at the head of that block.
+    pub window: [u8; WINDOW_LEN],
+}
+
+/// What a profile witness says.  These three cases are exhaustive, which
+/// is the whole of the M5 argument.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Profile {
+    /// `8B = 1776` and the window is not the pinned output's: an annex is
+    /// present and this is a genuine publication.
+    Published { window: [u8; WINDOW_LEN] },
+    /// `8B = 1776` but the window is the pinned output's hash: the
+    /// publisher signed `SINGLE|ANYONECANPAY` and committed to a constant
+    /// everyone could have written down in advance.
+    CommittedToPinnedOutput,
+    /// Not the protocol's profile at all.
+    WrongLength { bitcount: u64 },
+    /// The witness is not the publisher's.
+    NotHers,
+}
+
+impl ProfileWitness {
+    /// The signature hash the witness implies, in one compression.
+    pub fn sighash(&self) -> [u8; STATE_SIZE] {
+        compress(&self.h192, &final_block(&self.window))
+    }
+
+    /// The length field, read out of the final block.
+    pub fn bitcount(&self) -> u64 {
+        let b = final_block(&self.window);
+        u64::from_be_bytes(b[56..64].try_into().expect("8 bytes"))
+    }
+}
+
+/// Read the profile a publisher used.
+///
+/// `pinned_window` is the thirty-byte window of the hash of the output
+/// the covenant fixes at the slot input's index -- a constant known at
+/// setup.
+pub fn read_profile<C: Verification>(
+    secp: &Secp256k1<C>,
+    w: &ProfileWitness,
+    slot_key: &XOnlyPublicKey,
+    pinned_window: &[u8; WINDOW_LEN],
+) -> Profile {
+    let sig = match schnorr::Signature::from_slice(&w.signature) {
+        Ok(s) => s,
+        Err(_) => return Profile::NotHers,
+    };
+    if secp
+        .verify_schnorr(&sig, &Message::from_digest(w.sighash()), slot_key)
+        .is_err()
+    {
+        return Profile::NotHers;
+    }
+    // From here the tail is the true tail of the true message.
+    let n = w.bitcount();
+    if n != PROFILE_BITCOUNT {
+        return Profile::WrongLength { bitcount: n };
+    }
+    if &w.window == pinned_window {
+        return Profile::CommittedToPinnedOutput;
+    }
+    Profile::Published { window: w.window }
+}
+
+/// Does M5 stand against this publisher?
+pub fn m5_stands<C: Verification>(
+    secp: &Secp256k1<C>,
+    w: &ProfileWitness,
+    slot_key: &XOnlyPublicKey,
+    pinned_window: &[u8; WINDOW_LEN],
+) -> bool {
+    !matches!(
+        read_profile(secp, w, slot_key, pinned_window),
+        Profile::Published { .. }
+    )
+}
+
+/// M6 is M5, read one hop over: the disputer exhibits *`z`'s* signature
+/// on *`z`'s* slot, and if `z` published nothing then the reference to it
+/// answers nothing.
+pub fn m6_stands<C: Verification>(
+    secp: &Secp256k1<C>,
+    referenced: &ProfileWitness,
+    referenced_slot_key: &XOnlyPublicKey,
+    pinned_window: &[u8; WINDOW_LEN],
+) -> bool {
+    m5_stands(secp, referenced, referenced_slot_key, pinned_window)
+}
+
+/// The node value a published window carries.
+pub fn node_value_of(window: &[u8; WINDOW_LEN]) -> Node {
+    window[..NODE_BYTES].try_into().expect("20 bytes")
+}
+
+// ---------------------------------------------------------------------
+// M2: the opening is false
+// ---------------------------------------------------------------------
+
+/// A claim about one entry of a publication, and the opening that settles
+/// it.
+#[derive(Clone, Debug)]
+pub struct EntryClaim {
+    pub index: usize,
+    pub claimed: Node,
+    pub element: Vec<u8>,
+    pub proof: Proof,
+}
+
+/// Is the claim true?  The opening is checked against the digest, and the
+/// digest is what the publisher's signature committed to -- so a false
+/// opening is not refutable, it is impossible.
+pub fn entry_holds(
+    n_elements: usize,
+    digest: &[u8; STATE_SIZE],
+    frame: &Frame,
+    c: &EntryClaim,
+) -> bool {
+    let (elem, off) = child_position(c.index);
+    if c.element.len() < off + NODE_BYTES {
+        return false;
+    }
+    if c.element[off..off + NODE_BYTES] != c.claimed[..] {
+        return false;
+    }
+    verify_proof(n_elements, digest, elem, &c.element, &c.proof, frame)
+}
+
+// ---------------------------------------------------------------------
+// M4: the publication contradicts the sender's own selection
+// ---------------------------------------------------------------------
+
+/// By selecting index `k` at stage `i`, the sender asserts it disagrees
+/// with the value the stage-`(i-1)` publication lists there.  Its own
+/// publication at stage `i` must therefore *not* hash to that value.
+///
+/// A sender that republishes the counterparty's vector verbatim would
+/// leave the counterparty with two identical vectors and no index to
+/// select, and could then run out the clock.  This is the refutation that
+/// makes the selection rule total in practice as well as in principle.
+#[derive(Clone, Debug)]
+pub struct SelfContradiction {
+    /// The index the sender signed at this stage.
+    pub selected: usize,
+    /// The counterparty's previous publication, opened at that index.
+    pub previous: EntryClaim,
+    /// The node value of the sender's own publication at this stage.
+    pub own_value: Node,
+}
+
+/// Does M4 stand?  Open the previous publication at the selected index,
+/// authenticate this publication's digest, and compare the two 20-byte
+/// values: if they are equal the sender has contradicted its own signed
+/// selection.
+pub fn m4_stands(
+    prev_elements: usize,
+    prev_digest: &[u8; STATE_SIZE],
+    prev_frame: &Frame,
+    s: &SelfContradiction,
+) -> bool {
+    if s.previous.index != s.selected {
+        return false;
+    }
+    if !entry_holds(prev_elements, prev_digest, prev_frame, &s.previous) {
+        return false;
+    }
+    s.previous.claimed == s.own_value
+}
+
+/// The node value a publication's digest carries, for comparison.
+pub fn value_of_digest(digest: &[u8; STATE_SIZE]) -> Node {
+    digest[NODE_OFFSET..NODE_OFFSET + NODE_BYTES]
+        .try_into()
+        .expect("20 bytes")
+}
+
+// ---------------------------------------------------------------------
+// Which refutations ride in the dispute, and which are inherited
+// ---------------------------------------------------------------------
+
+/// Where each option's evidence comes from.  Every one of them is the
+/// disputer's: none demands an answer.
+pub fn evidence_for(code: MCode) -> &'static str {
+    match code {
+        MCode::Malformed => "a FlatMerkle malformation proof, O(log N)",
+        MCode::FalseOpening => "an opening against the signed digest",
+        MCode::WrongNode => "an opening of the sender's previous publication",
+        MCode::SelfContradiction => "an opening, and a comparison of two 20-byte values",
+        MCode::BadProfile => "the publisher's own signature",
+        MCode::DanglingReference => "the referenced publisher's signature",
+    }
+}
