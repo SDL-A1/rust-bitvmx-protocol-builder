@@ -186,3 +186,162 @@ pub fn build(elements: &[Vec<u8>], frame: Frame) -> StructuredFile {
     sf.digest = fstate;
     sf
 }
+
+// ---------------------------------------------------------------------------
+// Inclusion proofs
+// ---------------------------------------------------------------------------
+
+/// An opening of one element: the pair of data blocks it sits in, and one
+/// reveal per level above.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Proof {
+    pub index: usize,
+    pub d0: Vec<u8>,
+    pub d1: Vec<u8>,
+    pub reveals: Vec<[u8; STATE_SIZE]>,
+}
+
+impl Proof {
+    /// Bytes on the wire: two blocks and a state per level.
+    pub fn nbytes(&self) -> usize {
+        2 * BLOCK_SIZE + self.reveals.len() * STATE_SIZE
+    }
+}
+
+pub fn build_proof(sf: &StructuredFile, index: usize) -> Proof {
+    let l = sf.levels;
+    let a0 = index - (index % 2);
+    let mut pf = Proof {
+        index,
+        d0: sf.elements[a0].clone(),
+        d1: sf.elements[a0 + 1].clone(),
+        reveals: Vec::new(),
+    };
+    let half_top = 1usize << (l - 1);
+
+    fn recurse(sf: &StructuredFile, pf: &mut Proof, a: usize, k: u32, target: usize) {
+        if k == 1 {
+            return;
+        }
+        let half = 1usize << (k - 1);
+        if target < a + half {
+            recurse(sf, pf, a, k - 1, target);
+            pf.reveals.push(sf.prewrap[&(a + half, k - 1)]);
+        } else {
+            pf.reveals.push(sf.ending[&(a, k - 1)]);
+            recurse(sf, pf, a + half, k - 1, target);
+        }
+    }
+
+    if a0 < half_top {
+        recurse(sf, &mut pf, 0, l - 1, a0);
+        pf.reveals.push(sf.prewrap[&(half_top, l - 1)]);
+    } else {
+        pf.reveals.push(sf.ending[&(0, l - 1)]);
+        recurse(sf, &mut pf, half_top, l - 1, a0);
+    }
+    pf
+}
+
+/// The verifier's domain and well-formedness checks, made before any
+/// recursion so that a malformed proof is rejected rather than acted on.
+pub fn proof_shape_ok(n: usize, index: usize, data: &[u8], pf: &Proof) -> bool {
+    if n < MIN_ELEMENTS || !n.is_power_of_two() || index >= n {
+        return false;
+    }
+    let l = n.trailing_zeros() as usize;
+    pf.index == index
+        && data.len() <= BLOCK_SIZE
+        && pf.d0.len() == BLOCK_SIZE
+        && pf.d1.len() == BLOCK_SIZE
+        && pf.reveals.len() == l - 1
+}
+
+/// Verify an opening in `O(log N)` compressions, finishing with the same
+/// standard finalization the file itself used.
+///
+/// The frame has to be threaded all the way through: it supplies the
+/// starting state *and* the total length the finalization padding counts.
+/// Verifying against the wrong frame fails, which is the point -- the
+/// frame is what ties the file to the transaction that published it.
+pub fn verify_proof(
+    n: usize,
+    digest: &[u8; STATE_SIZE],
+    index: usize,
+    data: &[u8],
+    pf: &Proof,
+    frame: &Frame,
+) -> bool {
+    if !proof_shape_ok(n, index, data, pf) {
+        return false;
+    }
+    let l = n.trailing_zeros();
+    let a0 = index - (index % 2);
+    let padded = pad_element(data);
+    if index == a0 && padded != pf.d0 {
+        return false;
+    }
+    if index == a0 + 1 && padded != pf.d1 {
+        return false;
+    }
+
+    let half_top = 1usize << (l - 1);
+    let mut it = pf.reveals.iter();
+
+    fn eval_block(
+        pf: &Proof,
+        it: &mut std::slice::Iter<'_, [u8; STATE_SIZE]>,
+        a: usize,
+        k: u32,
+        target: usize,
+        ckpt: &[u8; STATE_SIZE],
+    ) -> Option<[u8; STATE_SIZE]> {
+        if k == 1 {
+            let s = compress(&compress(ckpt, &pf.d0), &pf.d1);
+            return Some(compress(&s, &mid_block(ckpt)));
+        }
+        let half = 1usize << (k - 1);
+        if target < a + half {
+            let left_end = eval_block(pf, it, a, k - 1, target, ckpt)?;
+            let sib_prewrap = it.next()?;
+            let right_end = compress(sib_prewrap, &mid_block(&left_end));
+            Some(compress(&right_end, &mid_block(ckpt)))
+        } else {
+            let left_end = *it.next()?;
+            let right_end = eval_block(pf, it, a + half, k - 1, target, &left_end)?;
+            Some(compress(&right_end, &mid_block(ckpt)))
+        }
+    }
+
+    let raw_state = if a0 < half_top {
+        let y = match eval_block(pf, &mut it, 0, l - 1, a0, &frame.iv()) {
+            Some(y) => y,
+            None => return false,
+        };
+        let r2 = match it.next() {
+            Some(r) => r,
+            None => return false,
+        };
+        compress(r2, &mid_block(&y))
+    } else {
+        let y_reveal = match it.next() {
+            Some(r) => *r,
+            None => return false,
+        };
+        match eval_block(pf, &mut it, half_top, l - 1, a0, &y_reveal) {
+            Some(s) => s,
+            None => return false,
+        }
+    };
+
+    if it.next().is_some() {
+        return false;
+    }
+
+    let pad = length_padding_blocks(frame.hashed_len(n));
+    let mut fstate = raw_state;
+    for blk in pad.chunks(BLOCK_SIZE) {
+        fstate = compress(&fstate, blk);
+    }
+    &fstate == digest
+}

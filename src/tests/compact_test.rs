@@ -478,3 +478,238 @@ mod witness_accounting {
         assert_eq!(back.taproot_annex(), Some(&a[..]));
     }
 }
+
+/// Opening one entry of a publication.  This is the part of the dispute
+/// that actually runs, and the part where the frame has to be threaded
+/// through verification as well as construction.
+#[cfg(test)]
+mod openings {
+    use crate::compact::annex::*;
+    use crate::compact::commitment::*;
+    use crate::compact::flatmerkle::*;
+    use crate::compact::sha256_core::*;
+    use bitcoin::hashes::{sha256, Hash};
+
+    fn publication(n: usize) -> StructuredFile {
+        let elements: Vec<Vec<u8>> = (0..n)
+            .map(|i| vec![((i * 7 + 1) & 0xFF) as u8; 64])
+            .collect();
+        build(&elements, annex_frame(n))
+    }
+
+    #[test]
+    fn every_element_opens() {
+        for n in [4usize, 8, 16, 64] {
+            let sf = publication(n);
+            for i in 0..n {
+                let pf = build_proof(&sf, i);
+                assert!(
+                    verify_proof(n, &sf.digest, i, &sf.elements[i], &pf, &sf.frame),
+                    "N = {n}, index {i}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_opening_is_288_bytes_at_b_192() {
+        // 64 elements, so six levels: two 64-byte data blocks and five
+        // 32-byte state reveals.
+        let sf = publication(64);
+        let pf = build_proof(&sf, 17);
+        assert_eq!(pf.reveals.len(), 5);
+        assert_eq!(pf.nbytes(), 2 * 64 + 5 * 32);
+        assert_eq!(pf.nbytes(), 288);
+    }
+
+    #[test]
+    fn opening_cost_is_96_plus_32_log2_n() {
+        for n in [4usize, 8, 16, 32, 64, 128, 256] {
+            let sf = publication(n);
+            let pf = build_proof(&sf, 1);
+            // the paper quotes 96 + 32 log2 N for a standalone file; here
+            // the pair of data blocks is carried in full, so it is
+            // 128 + 32 (log2 N - 1)
+            assert_eq!(pf.nbytes(), 128 + 32 * (n.trailing_zeros() as usize - 1));
+        }
+    }
+
+    #[test]
+    fn a_wrong_value_does_not_open() {
+        let n = 64;
+        let sf = publication(n);
+        for i in [0usize, 1, 17, 63] {
+            let pf = build_proof(&sf, i);
+            let mut wrong = sf.elements[i].clone();
+            wrong[0] ^= 1;
+            assert!(!verify_proof(n, &sf.digest, i, &wrong, &pf, &sf.frame));
+        }
+    }
+
+    #[test]
+    fn a_tampered_reveal_does_not_open() {
+        let n = 64;
+        let sf = publication(n);
+        for k in 0..5 {
+            let mut pf = build_proof(&sf, 17);
+            pf.reveals[k][0] ^= 1;
+            assert!(!verify_proof(
+                n,
+                &sf.digest,
+                17,
+                &sf.elements[17],
+                &pf,
+                &sf.frame
+            ));
+        }
+    }
+
+    #[test]
+    fn a_proof_for_one_index_does_not_open_another() {
+        let n = 64;
+        let sf = publication(n);
+        let pf = build_proof(&sf, 17);
+        assert!(!verify_proof(
+            n,
+            &sf.digest,
+            18,
+            &sf.elements[18],
+            &pf,
+            &sf.frame
+        ));
+    }
+
+    #[test]
+    fn a_malformed_proof_is_rejected_rather_than_acted_on() {
+        let n = 64;
+        let sf = publication(n);
+        let good = build_proof(&sf, 17);
+
+        let mut short = good.clone();
+        short.reveals.pop();
+        assert!(!verify_proof(
+            n,
+            &sf.digest,
+            17,
+            &sf.elements[17],
+            &short,
+            &sf.frame
+        ));
+
+        let mut long = good.clone();
+        long.reveals.push([0u8; 32]);
+        assert!(!verify_proof(
+            n,
+            &sf.digest,
+            17,
+            &sf.elements[17],
+            &long,
+            &sf.frame
+        ));
+
+        let mut stunted = good.clone();
+        stunted.d0.truncate(32);
+        assert!(!verify_proof(
+            n,
+            &sf.digest,
+            17,
+            &sf.elements[17],
+            &stunted,
+            &sf.frame
+        ));
+
+        // out of domain
+        assert!(!verify_proof(
+            n,
+            &sf.digest,
+            n,
+            &sf.elements[0],
+            &good,
+            &sf.frame
+        ));
+        assert!(!verify_proof(
+            3,
+            &sf.digest,
+            1,
+            &sf.elements[0],
+            &good,
+            &sf.frame
+        ));
+    }
+
+    /// The frame is not decoration.  A proof built in the annex frame must
+    /// not verify against a standalone digest, or the commitment would not
+    /// bind the file to the transaction that published it.
+    #[test]
+    fn an_opening_does_not_transfer_between_frames() {
+        let n = 64;
+        let elements: Vec<Vec<u8>> = (0..n)
+            .map(|i| vec![((i * 7 + 1) & 0xFF) as u8; 64])
+            .collect();
+        let framed = build(&elements, annex_frame(n));
+        let bare = build(&elements, Frame::standalone());
+        let pf = build_proof(&framed, 17);
+
+        assert!(verify_proof(
+            n,
+            &framed.digest,
+            17,
+            &elements[17],
+            &pf,
+            &framed.frame
+        ));
+        // right proof, right file, wrong frame
+        assert!(!verify_proof(
+            n,
+            &framed.digest,
+            17,
+            &elements[17],
+            &pf,
+            &bare.frame
+        ));
+        // and the two digests are different objects
+        assert_ne!(framed.digest, bare.digest);
+    }
+
+    /// End to end: the challenger holds only the signature and the
+    /// commitment window, and opens one child out of it.
+    #[test]
+    fn a_child_opens_from_the_commitment_window_alone() {
+        let n = 64;
+        let sf = publication(n);
+        let a = annex_bytes(&sf);
+
+        // what a verifier recovers from the signature
+        let window = &sha_annex(&a)[2..32];
+
+        // it reconstructs the full digest only if it also knows the two
+        // leading bytes -- which it does not, so it compares windows
+        let pf = build_proof(&sf, 17);
+        assert!(verify_proof(
+            n,
+            &sf.digest,
+            17,
+            &sf.elements[17],
+            &pf,
+            &sf.frame
+        ));
+        assert_eq!(&sf.digest[2..32], window);
+
+        // the node value the protocol reads is the first 20 of those 30
+        let node_value = &window[..20];
+        assert_eq!(node_value, &sf.digest[2..22]);
+        assert_eq!(node_value.len(), 20);
+    }
+
+    #[test]
+    fn the_digest_is_the_hash_of_the_framed_string() {
+        for n in [4usize, 8, 64] {
+            let sf = publication(n);
+            let mut framed = sf.frame.prefix.clone();
+            framed.extend_from_slice(&sf.raw_bytes);
+            assert_eq!(sf.digest, sha256::Hash::hash(&framed).to_byte_array());
+            assert_eq!(framed.len(), sf.frame.hashed_len(n));
+            assert_eq!(framed.len() % BLOCK_SIZE, 0);
+        }
+    }
+}
