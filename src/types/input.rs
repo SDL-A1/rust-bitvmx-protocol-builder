@@ -279,6 +279,15 @@ pub struct InputType {
     hashed_messages: Vec<Option<Vec<u8>>>,
     signatures: Vec<Option<Signature>>,
     spend_mode: SpendMode,
+    /// A BIP341 annex, if this input carries one.  It is witness data,
+    /// so it sits outside the txid and outside any `SIGHASH_ALL`
+    /// pre-signature made for a *different* input -- which is what makes
+    /// it useful for data chosen after the graph is signed.
+    ///
+    /// `#[serde(default)]` keeps stored graphs from before this field
+    /// deserialisable.
+    #[serde(default)]
+    annex: Option<Vec<u8>>,
 }
 
 impl InputType {
@@ -289,6 +298,7 @@ impl InputType {
             hashed_messages: vec![],
             signatures: vec![],
             spend_mode: spend_mode.clone(),
+            annex: None,
         }
     }
 
@@ -382,7 +392,23 @@ impl InputType {
             .ok_or(GraphError::MissingSignature)
     }
 
+    /// Attach a BIP341 annex to this input.  The leading `0x50` is part
+    /// of the annex and must be present.
+    pub fn set_annex(&mut self, annex: Vec<u8>) -> Result<(), GraphError> {
+        match annex.first() {
+            Some(&0x50) => {
+                self.annex = Some(annex);
+                Ok(())
+            }
+            _ => Err(GraphError::InvalidAnnex),
+        }
+    }
+
+    pub fn annex(&self) -> Option<&[u8]> {
+        self.annex.as_deref()
+    }
+
     pub fn annex_len(&self) -> usize {
-        0 // Placeholder for future use, currently no annex length is calculated.
+        self.annex.as_ref().map_or(0, |a| a.len())
     }
 }
