@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// A 32-byte checkpoint padded into a full block, mirroring SHA-256's own
 /// bit-padding convention.
-fn mid_block(checkpoint: &[u8; STATE_SIZE]) -> Vec<u8> {
+pub fn mid_block(checkpoint: &[u8; STATE_SIZE]) -> Vec<u8> {
     let mut b = checkpoint.to_vec();
     b.push(0x80);
     b.resize(BLOCK_SIZE, 0);

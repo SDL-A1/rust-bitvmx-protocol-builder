@@ -8,6 +8,7 @@ pub mod annex;
 pub mod commitment;
 pub mod dispute;
 pub mod flatmerkle;
+pub mod fraud;
 pub mod graph;
 pub mod memory;
 pub mod messages;

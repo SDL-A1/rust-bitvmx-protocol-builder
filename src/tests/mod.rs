@@ -4,6 +4,7 @@ pub mod builder_outputs_test;
 pub mod builder_persistance_test;
 pub mod compact_dispute_test;
 pub mod compact_endgame_test;
+pub mod compact_fraud_test;
 pub mod compact_graph_test;
 pub mod compact_search_test;
 pub mod compact_test;
