@@ -2,6 +2,7 @@ pub mod autovalues_fees_test;
 pub mod builder_connection_test;
 pub mod builder_outputs_test;
 pub mod builder_persistance_test;
+pub mod compact_circuit_test;
 pub mod compact_dispute_test;
 pub mod compact_endgame_test;
 pub mod compact_fraud_test;

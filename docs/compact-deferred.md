@@ -4,41 +4,56 @@ Tracking notes for the `compact` module. Nothing here is a bug; these
 are decisions to revisit, recorded so they are not mistaken for
 oversights later.
 
-## 1. The garbled circuits exist, but are not wired in
+## 1. The circuits are wired; the garbling is still trusted
 
-The `compact` module implements the dispute protocol end to end *except*
-the garbled circuits that decide a disputed step or a disputed
-compression. Those circuits are now built and measured -- see
-`compact/circuits/` in the paper repository -- and emitted as Bristol
-files with test vectors. What is deferred is the wiring:
+The `compact` module now runs the endgame exchange end to end:
+`bristol` loads a circuit, `garble` garbles it with free-XOR and
+half-gates, `release` commits to the inputs and seals `P_b` under the
+verdict wire's one-label, and `endgame` joins them into setup, claim and
+adjudication.  `Leaf::PreimageRelease` carries `h_b` and is a real
+script, executed by `bitcoin-scriptexec` with a real BIP341 script-path
+signature: the released secret spends the stake, and no other preimage
+does.
 
-- [ ] Carry the input labels from the one-time-signature commitment into
-      the evaluation, so the committed bits and the circuit's inputs are
-      the same objects
-- [ ] Publish `ct`, and add the branch a challenger spends with the
-      released `P_b`
+Over the 128 fixture vectors of A3's circuit, 64 lies release `P_b` byte
+for byte and 64 honest claims release nothing.
+
+Two things about that are worth stating plainly.
+
+**The input commitment is not ACW.**  What the protocol needs of the
+scheme is only that the prover publish two hashes a bit at setup and
+that opening a bit reveal exactly one preimage, which is the label.
+`release::BitCommitment` is that, with SHA-256.  ACW's contribution is
+guaranteed permissionless extraction and a smaller table, not a
+different binding, and the paper's weights (33.44 WU a bit) are ACW's.
+Swapping it in changes `BitCommitment` and nothing above it.
+
+**The garbling is accepted as given, and that is now load-bearing.**  It
+used to look like an upgrade: semi-honest first, malicious later.  It is
+not.  The verdict is never decoded and read -- it gates a secret, so
+there is no output decoding table and the garbler is the prover, the
+party whose committed bits are the labels.  A prover who garbles a
+circuit that always answers "the step was fine" wins.  What is left:
+
 - [ ] Carry the garbling-correctness proof, and the Lamport proof that
       accompanies it, through the dispute graph
-- [ ] A branch by which a party refuses a mis-garbled circuit rather than
-      having to trust it
+- [ ] Put `ct` inside the proved statement.  The challenger cannot check
+      `ct` before it evaluates; publishing `h_b` at setup is what makes
+      the statement `SHA256(ct xor H(W_v^1)) == h_b` expressible, at one
+      more compression
+- [ ] A branch by which a party refuses a mis-garbled circuit rather
+      than having to trust it
 - [ ] Decide whether the proof is checked off chain by the counterparty
       or made a condition of a spend
 
-**One thing changed since this file was first written.** The garbling
-proof used to look optional -- semi-honest first, malicious later. It is
-not optional. The circuit's verdict does not get decoded and read; it
-*gates* a secret, which means there is no output decoding table and the
-garbler is the prover, the party whose committed bits are the labels. A
-prover who garbles a circuit that always answers "the step was fine"
-wins. So the Nova correctness proof is load-bearing, and `ct` has to be
-inside the proved statement, because the challenger cannot check `ct`
-before it evaluates. Publishing `h_b = SHA256(P_b)` at setup is what
-makes that statement expressible, at one more compression.
+The engine already proves circuit correctness with a Nova recursive
+SNARK, and a step circuit is well inside the sizes it handles, so none
+of this is blocked.
 
-Nothing else in the construction depends on this. The circuit's inputs
-are committed with one-time signatures whose revealed preimages double as
-the input labels, and that commitment -- which is where the endgame's
-weight actually goes -- is independent of how the circuit is garbled.
+**The fixtures.**  Only A3's verdict circuit is checked in (251 kB).  The
+gated compression, which A1, A2, A4, B1, B2 and M1--M4 all reduce to, is
+3.7 MB in Bristol fashion and is not; nothing in the module is specific
+to either, and `emit.py` in the paper repository produces both.
 
 ## 2. The step circuit is larger than the paper estimated
 

@@ -11,7 +11,9 @@
 //! the shapes would multiply down the chain.
 
 use bitcoin::absolute::LockTime;
-use bitcoin::opcodes::all::{OP_CHECKSIG, OP_CSV, OP_DROP, OP_PUSHNUM_1};
+use bitcoin::opcodes::all::{
+    OP_CHECKSIG, OP_CSV, OP_DROP, OP_EQUALVERIFY, OP_PUSHNUM_1, OP_SHA256,
+};
 use bitcoin::secp256k1::{Secp256k1, Verification, XOnlyPublicKey};
 use bitcoin::taproot::{TaprootBuilder, TaprootSpendInfo};
 use bitcoin::transaction::Version;
@@ -59,8 +61,13 @@ pub enum Leaf {
     Reference,
     /// Cooperative: both parties sign.
     Cooperative,
-    /// The preimage the circuit releases when the step is wrong.
-    PreimageRelease,
+    /// The preimage the circuit releases when the claim is wrong.
+    ///
+    /// Carries `h_b = SHA256(P_b)`, fixed at setup, so the leaf is a
+    /// real script rather than a placeholder: a challenger spends it by
+    /// putting `P_b` on the stack, which it holds exactly when the
+    /// garbled evaluation released it.  See `compact::release`.
+    PreimageRelease { h_b: [u8; 32] },
 }
 
 /// A protocol output, with the leaves it carries.
@@ -72,6 +79,12 @@ pub struct Output {
 }
 
 impl Output {
+    /// The script of one leaf.  Public for the release leaf, which is
+    /// the one a party actually has to build a witness for.
+    pub fn release_script(leaf: &Leaf, key: &XOnlyPublicKey) -> ScriptBuf {
+        Output::script_for(leaf, key)
+    }
+
     fn script_for(leaf: &Leaf, key: &XOnlyPublicKey) -> ScriptBuf {
         // Stand-ins with the right *shape*: what matters structurally is
         // how many leaves an output carries and which of them is timelocked,
@@ -86,6 +99,15 @@ impl Output {
                 .push_opcode(OP_CHECKSIG)
                 .into_script(),
             Leaf::KeyPathPublication => b.push_opcode(OP_PUSHNUM_1).into_script(),
+            // The one leaf whose opcodes matter: it is what the endgame
+            // spends, and what it checks is the released secret.
+            Leaf::PreimageRelease { h_b } => b
+                .push_opcode(OP_SHA256)
+                .push_slice(h_b)
+                .push_opcode(OP_EQUALVERIFY)
+                .push_x_only_key(key)
+                .push_opcode(OP_CHECKSIG)
+                .into_script(),
             _ => b
                 .push_x_only_key(key)
                 .push_opcode(OP_CHECKSIG)
@@ -165,6 +187,16 @@ pub struct Params {
     /// How many parties can reference each other's publications.
     pub parties: usize,
     pub delta: u16,
+    /// `SHA256(P_b)` for the endgame's release, fixed before any
+    /// transaction is signed because it sits in the stake's script.
+    pub h_b: [u8; 32],
+}
+
+impl Params {
+    /// The parameters of a dispute whose endgame releases `P_b`.
+    pub fn with_release(self, h_b: [u8; 32]) -> Self {
+        Params { h_b, ..self }
+    }
 }
 
 impl Default for Params {
@@ -173,6 +205,9 @@ impl Default for Params {
             levels: 4,
             parties: 2,
             delta: DELTA,
+            // A stand-in until a dispute instance seals its own secret;
+            // `Params::with_release` is what a real setup calls.
+            h_b: [0u8; 32],
         }
     }
 }
@@ -216,6 +251,7 @@ impl Graph {
         key: &XOnlyPublicKey,
         params: Params,
     ) -> Self {
+        let h_b = params.h_b;
         let mut g = Graph {
             params,
             nodes: Vec::new(),
@@ -232,7 +268,7 @@ impl Graph {
             vec![
                 Output {
                     role: Role::Stake,
-                    leaves: vec![Leaf::Cooperative, Leaf::PreimageRelease],
+                    leaves: vec![Leaf::Cooperative, Leaf::PreimageRelease { h_b }],
                     value: 100_000,
                 },
                 Output {
@@ -287,7 +323,7 @@ impl Graph {
             if i == 2 {
                 outs.push(Output {
                     role: Role::Bond,
-                    leaves: vec![Leaf::Cooperative, Leaf::PreimageRelease],
+                    leaves: vec![Leaf::Cooperative, Leaf::PreimageRelease { h_b }],
                     value: 50_000,
                 });
             }
