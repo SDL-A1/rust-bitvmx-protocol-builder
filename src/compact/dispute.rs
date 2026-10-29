@@ -359,7 +359,6 @@ pub fn value_of_digest(digest: &[u8; STATE_SIZE]) -> Node {
 pub fn evidence_for(code: MCode) -> &'static str {
     match code {
         MCode::Malformed => "a FlatMerkle malformation proof, O(log N)",
-        MCode::FalseOpening => "an opening against the signed digest",
         MCode::WrongNode => "an opening of the sender's previous publication",
         MCode::SelfContradiction => "an opening, and a comparison of two 20-byte values",
         MCode::BadProfile => "the publisher's own signature",

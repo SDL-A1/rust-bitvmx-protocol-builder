@@ -480,7 +480,6 @@ mod tests {
         assert_eq!(ChallengeMessage::bits(), 11);
         for code in [
             MCode::Malformed,
-            MCode::FalseOpening,
             MCode::WrongNode,
             MCode::SelfContradiction,
             MCode::BadProfile,
@@ -499,10 +498,15 @@ mod tests {
     }
 
     #[test]
-    fn three_bits_of_option_code_name_six_outcomes() {
+    fn three_bits_of_option_code_name_five_outcomes() {
+        // M2 "the opening is false" was retired: refuting an inclusion
+        // claim needs a claim, and a publication makes none -- it is a
+        // byte string in an annex, and whatever sits at an index is what
+        // sits there.  The mechanism lives in the endgame, as B2, where
+        // tau does make such a claim.
         for c in 0u8..8 {
             let m = MCode::from_code(c);
-            assert_eq!(m.is_some(), c < 6, "code {c}");
+            assert_eq!(m.is_some(), c < 5, "code {c}");
         }
     }
 
@@ -519,7 +523,6 @@ mod tests {
             );
         }
         assert!(!MCode::SelfContradiction.reads_index(), "already on chain");
-        assert!(MCode::FalseOpening.reads_index());
     }
 
     #[test]
@@ -546,7 +549,6 @@ mod tests {
     fn every_option_has_evidence_and_none_of_it_is_an_answer() {
         for c in [
             MCode::Malformed,
-            MCode::FalseOpening,
             MCode::WrongNode,
             MCode::SelfContradiction,
             MCode::BadProfile,
@@ -602,7 +604,6 @@ mod what_each_dispute_costs {
 
         let evidence = [
             (MCode::Malformed, malformation),
-            (MCode::FalseOpening, opening),
             (MCode::WrongNode, opening),
             // an opening, and the two 20-byte values it contradicts
             (MCode::SelfContradiction, opening + 2 * NODE_BYTES),

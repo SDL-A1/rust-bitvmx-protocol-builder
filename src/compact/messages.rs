@@ -23,27 +23,24 @@ fn nibbles(bits: usize) -> usize {
 pub enum MCode {
     /// Not a canonical FlatMerkle file.
     Malformed = 0,
-    /// The claimed entry is not the one the file holds.
-    FalseOpening = 1,
     /// Anchored only: the publication is of the wrong node.
-    WrongNode = 2,
+    WrongNode = 1,
     /// The publication contradicts the sender's own selection.
-    SelfContradiction = 3,
+    SelfContradiction = 2,
     /// The slot was not spent with the protocol's signature-hash profile.
-    BadProfile = 4,
+    BadProfile = 3,
     /// The reference points at a stage that published nothing.
-    DanglingReference = 5,
+    DanglingReference = 4,
 }
 
 impl MCode {
     pub fn from_code(c: u8) -> Option<MCode> {
         Some(match c {
             0 => MCode::Malformed,
-            1 => MCode::FalseOpening,
-            2 => MCode::WrongNode,
-            3 => MCode::SelfContradiction,
-            4 => MCode::BadProfile,
-            5 => MCode::DanglingReference,
+            1 => MCode::WrongNode,
+            2 => MCode::SelfContradiction,
+            3 => MCode::BadProfile,
+            4 => MCode::DanglingReference,
             _ => return None,
         })
     }
@@ -52,7 +49,7 @@ impl MCode {
     /// publication as a whole; M4's index is the sender's own signed
     /// selection, already on chain.
     pub fn reads_index(self) -> bool {
-        matches!(self, MCode::FalseOpening | MCode::WrongNode)
+        matches!(self, MCode::WrongNode)
     }
 }
 
