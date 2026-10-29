@@ -556,3 +556,82 @@ mod tests {
         }
     }
 }
+
+/// What each publication dispute costs, and which one sets the stake.
+///
+/// The stake has to cover the worst dispute the graph can reach, so the
+/// interesting number is not any one option's but the maximum over all
+/// of them.  Every option's evidence is the disputer's, and it goes in
+/// as circuit input -- committed bit by bit -- so the weight is the
+/// commitment's, not the raw bytes'.
+#[cfg(test)]
+mod what_each_dispute_costs {
+    use crate::compact::annex::annex_frame;
+    use crate::compact::dispute::PROFILE_WITNESS_LEN;
+    use crate::compact::flatmerkle::{build, build_proof, StructuredFile};
+    use crate::compact::fraud::*;
+    use crate::compact::messages::MCode;
+    use crate::compact::tracetree::NODE_BYTES;
+
+    /// ACW (4,16), the scheme Section 10 prices everything in.
+    const WU_PER_BYTE: f64 = 8.0 * 33.44;
+    /// A publication at b = 192 is 64 FlatMerkle elements.
+    const N: usize = 64;
+
+    fn file() -> StructuredFile {
+        let elements: Vec<Vec<u8>> = (0..N).map(|i| vec![((i * 7 + 1) & 0xFF) as u8; 64]).collect();
+        build(&elements, annex_frame(N))
+    }
+
+    fn malformation_bytes() -> usize {
+        let sf = file();
+        let mut raw = sf.raw_bytes.clone();
+        raw[0] ^= 0x11;
+        let scan = scan_for_violations(N, &raw, &sf.frame).expect("scan");
+        let target = pick_provable_target(&scan).expect("a provable target");
+        build_fraud_proof(&scan, target, &provable_set(&scan, target))
+            .expect("a proof")
+            .nbytes()
+    }
+
+    #[test]
+    fn m1_is_the_worst_case_and_m5_is_not_close() {
+        let sf = file();
+        let opening = build_proof(&sf, 0).nbytes();
+        let malformation = malformation_bytes();
+
+        let evidence = [
+            (MCode::Malformed, malformation),
+            (MCode::FalseOpening, opening),
+            (MCode::WrongNode, opening),
+            // an opening, and the two 20-byte values it contradicts
+            (MCode::SelfContradiction, opening + 2 * NODE_BYTES),
+            (MCode::BadProfile, PROFILE_WITNESS_LEN),
+            (MCode::DanglingReference, PROFILE_WITNESS_LEN),
+        ];
+        for (code, bytes) in evidence {
+            println!(
+                "{code:?}: {bytes} B, {:.0} WU committed",
+                bytes as f64 * WU_PER_BYTE
+            );
+        }
+
+        let worst = evidence.iter().map(|(_, b)| *b).max().unwrap();
+        assert_eq!(
+            worst, malformation,
+            "M1 is the worst publication dispute"
+        );
+        assert!(
+            malformation > 2 * PROFILE_WITNESS_LEN,
+            "M5 is not close to it: {malformation} against {PROFILE_WITNESS_LEN}"
+        );
+        println!(
+            "\nworst publication dispute: {worst} B, {:.0} WU",
+            worst as f64 * WU_PER_BYTE
+        );
+        println!(
+            "M5 has {} B of slack before it sets the stake",
+            worst - PROFILE_WITNESS_LEN
+        );
+    }
+}
