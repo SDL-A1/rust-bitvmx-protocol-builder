@@ -551,9 +551,12 @@ impl Graph {
         let output: Vec<TxOut> = outputs
             .iter()
             .map(|o| match o.role {
+                // The framed scriptPubKey, so that the file starts at
+                // byte 64 of the serialized output and its digest is
+                // sha_single_output.
                 Role::Publication { bytes } => TxOut {
                     value: Amount::ZERO,
-                    script_pubkey: super::commitment::op_return_spk(&vec![0u8; bytes]),
+                    script_pubkey: super::output::spk_for(&vec![0u8; bytes]),
                 },
                 _ if is_pinned(o) => TxOut {
                     value: Amount::ZERO,

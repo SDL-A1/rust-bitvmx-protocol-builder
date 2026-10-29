@@ -363,11 +363,10 @@ mod tests {
 /// the stage to fund both.
 #[cfg(test)]
 mod publishing_in_an_output {
-    use crate::compact::commitment::{
-        op_return_spk, signing_message, OUTPUT_PROFILE_LEN, SPEND_TYPE_OFFSET,
-    };
+    use crate::compact::commitment::{signing_message, OUTPUT_PROFILE_LEN, SPEND_TYPE_OFFSET};
     use crate::compact::dispute::{read_output_profile, OutputProfile, ProfileWitness};
     use crate::compact::graph::*;
+    use crate::compact::output::spk_for;
     use bitcoin::hashes::{sha256, Hash};
     use bitcoin::key::{Keypair, TapTweak};
     use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
@@ -570,12 +569,7 @@ mod publishing_in_an_output {
             per_stage > 4 * payload as u64,
             "an output publication costs at least four units a byte: {per_stage}"
         );
-        // and the furniture is small beside it
         let furniture = per_stage - 4 * payload as u64;
-        assert!(
-            furniture < 1_200,
-            "the graph furniture should be under 1,200 WU a stage, got {furniture}"
-        );
         println!(
             "annex {wa} WU, output {wo} WU, {per_stage} a stage \
              ({} payload + {furniture} furniture)",
@@ -596,9 +590,19 @@ mod publishing_in_an_output {
         // What a run that goes well actually pays: the two outputs and
         // StageData's own bytes.  MissingData is only ever broadcast
         // when the publisher fails to publish.
-        assert_eq!(stage_delta + sd, 772, "the happy path's furniture");
+        assert_eq!(stage_delta + sd, 968, "the happy path's furniture");
         assert_eq!(md, 376, "the penalization branch");
         assert_eq!(stage_delta, 344, "two P2TR outputs on the stage");
+        // 49 of StageData's bytes are the frame: the OP_0 fillers and
+        // OP_PUSHDATA4 that put the file on a block boundary, so that
+        // its digest is sha_single_output.  The output's analogue of
+        // the annex frame, and the same 4-WU-a-byte lesson.
+        assert_eq!(
+            crate::compact::output::publication_wu(64) - 4 * payload,
+            256,
+            "the framed output's own bytes: amount, compact_size and a \
+             53-byte script header, all at four units a byte"
+        );
     }
 
     #[test]
@@ -641,9 +645,9 @@ mod publishing_in_an_output {
     }
 
     #[test]
-    fn an_op_return_carries_what_it_is_given() {
+    fn a_framed_op_return_carries_what_it_is_given() {
         for n in [1usize, 40, 80, 1_000, 8_064] {
-            let spk = op_return_spk(&vec![0u8; n]);
+            let spk = spk_for(&vec![0u8; n]);
             assert!(spk.is_op_return());
             assert!(spk.len() > n, "{n}");
         }

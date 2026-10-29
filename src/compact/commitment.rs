@@ -69,14 +69,6 @@ pub const CONSTANT_TAIL_OFFSET: usize =
 /// Offset, within that block, of `sha_single_output`.
 pub const OUTPUT_DIGEST_OFFSET: usize = OUTPUT_PROFILE_LEN - 32 - OUTPUT_FINAL_BLOCK_START;
 
-/// `OP_RETURN <data>`, with the push the data's length demands.
-pub fn op_return_spk(data: &[u8]) -> bitcoin::ScriptBuf {
-    use bitcoin::opcodes::all::OP_RETURN;
-    let mut b = bitcoin::script::Builder::new().push_opcode(OP_RETURN);
-    b = b.push_slice::<&bitcoin::script::PushBytes>(data.try_into().expect("an OP_RETURN payload"));
-    b.into_script()
-}
-
 /// The 64 bytes a BIP340 tagged hash puts in front of its message.
 pub fn tap_sighash_tag() -> Vec<u8> {
     let t = sha256::Hash::hash(b"TapSighash").to_byte_array();

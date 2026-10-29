@@ -15,6 +15,7 @@ pub mod garble;
 pub mod graph;
 pub mod memory;
 pub mod messages;
+pub mod output;
 pub mod release;
 pub mod search;
 pub mod sha256_core;

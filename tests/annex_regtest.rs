@@ -13,7 +13,10 @@
 //! target is trivial to hit and `submitblock` is all that is needed.
 //!
 //! Ignored by default.  Run with a node listening on $BITCOIN_RPC_URL:
-//!   cargo test --test annex_regtest -- --ignored --nocapture
+//!   cargo test --test annex_regtest -- --ignored --nocapture --test-threads=1
+//!
+//! Serially: every test here mines its own blocks against one chain, so
+//! two of them in parallel race for the tip.
 
 use bitcoin::absolute::LockTime;
 use bitcoin::blockdata::block::{Block, Header, Version as BlockVersion};
@@ -426,4 +429,253 @@ fn a_real_node_on_an_annex_publication() {
             tx3.weight().to_wu()
         );
     }
+}
+
+/// Does a real node accept a publication in an `OP_RETURN`?
+///
+/// The annex test above separates consensus from policy because the
+/// annex fails the second.  Here the question is the reverse, and it is
+/// the reason the output mode exists: the whole point of paying four
+/// weight units a byte instead of one is that the transaction *relays*.
+/// So `testmempoolaccept` is the assertion, not a printout.
+///
+/// Everything else is Section 11: two inputs under two keys, one signed
+/// `SIGHASH_SINGLE` so that the commitment is `sha_single_output`, one
+/// signed `SIGHASH_ALL` so that the transaction is not malleable, and
+/// the `OP_RETURN` at the index of the first.
+#[test]
+#[ignore = "needs a regtest bitcoind"]
+fn a_real_node_on_an_output_publication() {
+    use protocol_builder::compact::commitment::{OUTPUT_PROFILE_LEN, SPEND_TYPE_OFFSET};
+    use protocol_builder::compact::dispute::{read_output_profile, OutputProfile, ProfileWitness};
+    use protocol_builder::compact::output::{output_frame, spk_for};
+
+    let secp = Secp256k1::new();
+    // two keys of the same party: A makes the commitment, B pins the tx
+    let ka = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[0x21; 32]).unwrap());
+    let kb = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[0x22; 32]).unwrap());
+    let spk_a = taproot_spk(&secp, &ka);
+    let spk_b = taproot_spk(&secp, &kb);
+    let client = rpc();
+
+    // ---- fund one output for each key --------------------------------
+    let mut data_out: Option<(OutPoint, TxOut)> = None;
+    let mut data_fee: Option<(OutPoint, TxOut)> = None;
+    for i in 0..=COINBASE_MATURITY + 1 {
+        let to = if i == 1 { &spk_b } else { &spk_a };
+        let b = mine(&client, to, vec![], 0);
+        let op = OutPoint {
+            txid: b.txdata[0].compute_txid(),
+            vout: 0,
+        };
+        if i == 0 {
+            data_out = Some((op, b.txdata[0].output[0].clone()));
+        } else if i == 1 {
+            data_fee = Some((op, b.txdata[0].output[0].clone()));
+        }
+    }
+    let (out_point, out_prev) = data_out.expect("data_out");
+    let (fee_point, fee_prev) = data_fee.expect("data_fee");
+
+    // ---- the publication, framed for an output -----------------------
+    let n = 64;
+    let elements: Vec<Vec<u8>> = (0..n)
+        .map(|i| vec![((i * 11 + 3) & 0xFF) as u8; 64])
+        .collect();
+    let sf = build(&elements, output_frame(n));
+    println!(
+        "publication: {} byte file in an OP_RETURN",
+        sf.raw_bytes.len()
+    );
+    // The frame's whole purpose: the file's FlatMerkle digest IS
+    // sha_single_output of the output carrying it.  Without the OP_0
+    // fillers that put the file on a block boundary this fails, which is
+    // the same mistake Definition 4.1 made for the annex.
+    let framed_out = TxOut {
+        value: Amount::ZERO,
+        script_pubkey: spk_for(&sf.raw_bytes),
+    };
+    let sso_expected = {
+        use bitcoin::hashes::sha256;
+        let mut ser = Vec::new();
+        bitcoin::consensus::Encodable::consensus_encode(&framed_out, &mut ser).unwrap();
+        sha256::Hash::hash(&ser).to_byte_array()
+    };
+    assert_eq!(
+        sf.digest, sso_expected,
+        "the framed file's digest is sha_single_output"
+    );
+    println!("the file's digest IS sha_single_output of the output carrying it");
+
+    // ---- StageData: two inputs, the OP_RETURN at input 0's index -----
+    let fee = 50_000u64;
+    let mut tx = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![
+            TxIn {
+                previous_output: out_point,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            },
+            TxIn {
+                previous_output: fee_point,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            },
+        ],
+        output: vec![
+            TxOut {
+                value: Amount::ZERO,
+                script_pubkey: spk_for(&sf.raw_bytes),
+            },
+            TxOut {
+                value: out_prev.value + fee_prev.value - Amount::from_sat(fee),
+                script_pubkey: spk_a.clone(),
+            },
+        ],
+    };
+    let prevouts = vec![out_prev.clone(), fee_prev.clone()];
+
+    // input 0, SIGHASH_SINGLE: this is the commitment
+    let msg = signing_message(
+        &tx,
+        0,
+        &Prevouts::All(&prevouts),
+        None,
+        None,
+        TapSighashType::Single,
+    )
+    .expect("signing message");
+    assert_eq!(msg.len(), OUTPUT_PROFILE_LEN, "the 239-byte profile");
+    assert_eq!(msg[SPEND_TYPE_OFFSET], 0, "a bare key-path spend");
+    println!(
+        "signing message: {} bytes, bitcount {}",
+        msg.len(),
+        8 * msg.len()
+    );
+
+    let sighash_a = {
+        use bitcoin::hashes::sha256;
+        sha256::Hash::hash(&msg).to_byte_array()
+    };
+    let tweak_a = ka.tap_tweak(&secp, None);
+    let sig_a =
+        secp.sign_schnorr_no_aux_rand(&Message::from_digest(sighash_a), &tweak_a.to_keypair());
+    let mut wa = Witness::new();
+    let mut ser_a = sig_a.serialize().to_vec();
+    ser_a.push(TapSighashType::Single as u8); // 0x03, a 65-byte signature
+    wa.push(&ser_a);
+    tx.input[0].witness = wa;
+
+    // input 1, SIGHASH_ALL: this is what pins the transaction
+    let msg_b = signing_message(
+        &tx,
+        1,
+        &Prevouts::All(&prevouts),
+        None,
+        None,
+        TapSighashType::All,
+    )
+    .expect("signing message");
+    let sighash_b = {
+        use bitcoin::hashes::sha256;
+        sha256::Hash::hash(&msg_b).to_byte_array()
+    };
+    let tweak_b = kb.tap_tweak(&secp, None);
+    let sig_b =
+        secp.sign_schnorr_no_aux_rand(&Message::from_digest(sighash_b), &tweak_b.to_keypair());
+    let mut wb = Witness::new();
+    let mut ser_b = sig_b.serialize().to_vec();
+    ser_b.push(TapSighashType::All as u8);
+    wb.push(&ser_b);
+    tx.input[1].witness = wb;
+
+    println!(
+        "StageData: {} bytes, {} WU, OP_RETURN of {} bytes",
+        tx.total_size(),
+        tx.weight().to_wu(),
+        sf.raw_bytes.len()
+    );
+
+    // ---- POLICY.  This is the claim the mode is for. -----------------
+    println!("\n--- policy ---");
+    let accept = client
+        .test_mempool_accept(&[&tx])
+        .expect("testmempoolaccept");
+    println!("{:?}", accept[0]);
+    assert!(
+        accept[0].allowed,
+        "an OP_RETURN publication must relay -- that is the whole point \
+         of paying four weight units a byte: {:?}",
+        accept[0].reject_reason
+    );
+    let in_mempool = client
+        .send_raw_transaction(&tx)
+        .expect("sendrawtransaction");
+    println!("accepted into the mempool: {in_mempool}");
+
+    // ---- consensus ---------------------------------------------------
+    println!("\n--- consensus ---");
+    let before = client.get_block_count().unwrap();
+    let block = mine(&client, &spk_a, vec![tx.clone()], fee);
+    assert_eq!(client.get_block_count().unwrap(), before + 1);
+    let txid = tx.compute_txid();
+    let fetched: Transaction = client
+        .get_raw_transaction(&txid, Some(&block.block_hash()))
+        .expect("fetch");
+    assert_eq!(
+        fetched.output[0].script_pubkey.as_bytes(),
+        spk_for(&sf.raw_bytes).as_bytes(),
+        "the file came back byte for byte"
+    );
+    println!("confirmed, and the OP_RETURN round-tripped");
+
+    // ---- and M5 reads it ---------------------------------------------
+    println!("\n--- M5 ---");
+    let (xonly_a, _) = tweak_a.to_keypair().x_only_public_key();
+    let w = ProfileWitness::for_message(sig_a.serialize(), &msg);
+    let mut ser = Vec::new();
+    bitcoin::consensus::Encodable::consensus_encode(&fetched.output[0], &mut ser).unwrap();
+    let sso = {
+        use bitcoin::hashes::sha256;
+        sha256::Hash::hash(&ser).to_byte_array()
+    };
+    match read_output_profile(&secp, &w, &xonly_a) {
+        OutputProfile::Published { window } => {
+            assert_eq!(
+                window[..],
+                sso[2..32],
+                "the window is sha_single_output of the confirmed output"
+            );
+            println!("reads as a publication, window = sha_single_output[2..32]");
+        }
+        other => panic!("the honest publication read as {other:?}"),
+    }
+
+    // the same transaction signed ALL instead would be convicted
+    let msg_all = signing_message(
+        &tx,
+        0,
+        &Prevouts::All(&prevouts),
+        None,
+        None,
+        TapSighashType::All,
+    )
+    .unwrap();
+    let sighash_all = {
+        use bitcoin::hashes::sha256;
+        sha256::Hash::hash(&msg_all).to_byte_array()
+    };
+    let sig_all =
+        secp.sign_schnorr_no_aux_rand(&Message::from_digest(sighash_all), &tweak_a.to_keypair());
+    let w_all = ProfileWitness::for_message(sig_all.serialize(), &msg_all);
+    assert_eq!(
+        read_output_profile(&secp, &w_all, &xonly_a),
+        OutputProfile::CommittedToEveryOutput,
+        "signing ALL over the same transaction must be caught"
+    );
+    println!("and the same spend signed ALL is caught by the five bytes");
 }

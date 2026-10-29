@@ -97,7 +97,7 @@ That was the source model's own count, in which a multi-way multiplexer
 costs a full table; it is not comparable to an AND-gate figure and should
 not have been written down next to one.
 
-## 3. Both publication modes build; only the annex has been to a node
+## 3. Both publication modes build, and both have been to a node
 
 `Params::publishing_in_an_output()` switches the graph from an annex
 publication to an `OP_RETURN` one: every stage gains a `DataOut` and a
@@ -107,20 +107,28 @@ and a `MissingData` races the first.  `dispute::read_output_profile` is
 M5 for that profile, four clauses, all inside the one final block the
 witness already carries.
 
-What has *not* happened is the regtest leg.  `tests/annex_regtest.rs`
-takes an annex publication to a real `bitcoind`; there is no equivalent
-for the output mode, which would be worth having precisely because the
-output mode is the one a node will actually relay.
+`tests/annex_regtest.rs` takes both to a real `bitcoind` on regtest.
+The annex is accepted by consensus and rejected by policy
+(`bad-witness-nonstandard`); the output publication is accepted by
+both, which is the claim the mode exists for and is now asserted
+rather than printed.  Run them with `--test-threads=1`: each mines its
+own blocks against one chain.
 
-- [ ] A regtest test that mines a `StageData` with both signatures and
-      checks the node accepts it
-- [ ] The same for `MissingData` after the timelock
+What is still missing there:
 
-Weighing the two graphs is how the paper's furniture figure was
-corrected, from 401 WU to 772 a stage plus 376 on the penalization
-branch.  The first number came from counting one output and one input;
-there are two of each, plus StageData's overhead and a whole
-MissingData.
+- [ ] `MissingData` after the timelock -- a script-path spend of the
+      `DataOut` leaf, which nothing yet exercises against a node
+- [ ] A `StageData` built by `Graph::build` rather than by the test, so
+      that the graph's own outputs are the ones spent
+
+Two figures the implementation corrected.  The furniture went from 401
+WU a stage to 968 plus 376 on the penalization branch: the first number
+counted one output and one input, where there are two of each, plus
+StageData's overhead and a whole MissingData.  And the publication went
+from 32,316 WU to 32,512, because the file has to start at byte 64 of
+the serialized output for its digest to be `sha_single_output` -- the
+output's analogue of the annex frame, bought with 49 bytes of `OP_0`
+fillers and an `OP_PUSHDATA4`.
 
 ## 4. Deduplication is specified but not built
 
