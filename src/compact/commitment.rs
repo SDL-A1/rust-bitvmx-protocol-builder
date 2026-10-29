@@ -90,6 +90,13 @@ pub fn sighash_from_commitment(
 
 /// The final block as it is actually laid out, for inspection: the window,
 /// the terminator, the zero fill, and the length field.
+/// The final block of a message of the protocol's own profile: the
+/// window, the padding byte, zeros, and the 1776-bit length field.
+///
+/// Only for that profile.  M5 reads messages of every profile, and
+/// eleven of the fourteen have a final block this cannot produce, so
+/// `dispute::ProfileWitness` carries the block rather than rebuilding
+/// it here.
 pub fn final_block(window: &[u8; WINDOW_LEN]) -> Vec<u8> {
     let mut b = window.to_vec();
     b.push(0x80);

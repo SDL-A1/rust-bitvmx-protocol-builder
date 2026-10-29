@@ -12,10 +12,10 @@
 //! rests on -- that for *every* byte string an honest opponent can prove
 //! either an inclusion or a malformation -- is inherited, not rebuilt.
 
-use super::commitment::{final_block, PROFILE_BITCOUNT, WINDOW_LEN};
+use super::commitment::{PROFILE_BITCOUNT, WINDOW_LEN};
 use super::flatmerkle::{verify_proof, Frame, Proof};
 use super::messages::MCode;
-use super::sha256_core::{compress, STATE_SIZE};
+use super::sha256_core::{compress, midstate_at, BLOCK_SIZE, STATE_SIZE};
 use super::tracetree::{child_position, Node, NODE_BYTES, NODE_OFFSET};
 use bitcoin::secp256k1::{schnorr, Message, Secp256k1, Verification, XOnlyPublicKey};
 
@@ -23,20 +23,37 @@ use bitcoin::secp256k1::{schnorr, Message, Secp256k1, Verification, XOnlyPublicK
 // M5 and M6: what profile did the publisher actually sign?
 // ---------------------------------------------------------------------
 
-/// The profile witness: the publisher's own signature, and the tail of
-/// the message it signed.
+/// The profile witness: the publisher's own signature, the chaining
+/// state before SHA-256's final block of the message it signed, and that
+/// block.
 ///
 /// The disputer cannot have invented this -- it cannot forge under the
 /// publisher's key -- so if the signature verifies, the length field and
 /// the window are the real ones.
+///
+/// The final block is carried **whole**, not rebuilt from a thirty-byte
+/// head.  `commitment::final_block` rebuilds it as
+/// `window || 80 || 00^25 || 1776`, which is right for the protocol's own
+/// 222-byte profile and wrong for everything else -- and everything else
+/// is exactly what M5 convicts.  Of the fourteen profiles, three have a
+/// final block of that shape, and `ALL|ANYONECANPAY` with no annex, the
+/// spend M5 exists to catch, is not among them.
+///
+/// Nothing here checks that the block is correctly shaped padding, and
+/// nothing needs to: a disputer who invents one must steer
+/// `compress(h192, block)` to a digest the publisher actually signed,
+/// which is a free-start preimage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileWitness {
     pub signature: [u8; 64],
     /// The chaining state before the final block.
     pub h192: [u8; STATE_SIZE],
-    /// The thirty bytes at the head of that block.
-    pub window: [u8; WINDOW_LEN],
+    /// That block, all sixty-four bytes of it.
+    pub final_block: [u8; BLOCK_SIZE],
 }
+
+/// What a disputer commits as circuit input: signature, state, block.
+pub const PROFILE_WITNESS_LEN: usize = 64 + STATE_SIZE + BLOCK_SIZE;
 
 /// What a profile witness says.  These three cases are exhaustive, which
 /// is the whole of the M5 argument.
@@ -56,15 +73,40 @@ pub enum Profile {
 }
 
 impl ProfileWitness {
+    /// Build the witness for a message the publisher signed.
+    ///
+    /// Any message, of any profile: the block is taken as it is rather
+    /// than reconstructed, so this works for the ones M5 convicts as
+    /// well as for the one it does not.
+    pub fn for_message(signature: [u8; 64], msg: &[u8]) -> Self {
+        let n_blocks = (msg.len() + 9).div_ceil(BLOCK_SIZE);
+        let mut padded = msg.to_vec();
+        padded.push(0x80);
+        padded.resize(BLOCK_SIZE * n_blocks - 8, 0);
+        padded.extend_from_slice(&(8 * msg.len() as u64).to_be_bytes());
+        let start = BLOCK_SIZE * (n_blocks - 1);
+        ProfileWitness {
+            signature,
+            h192: midstate_at(&padded, start),
+            final_block: padded[start..].try_into().expect("64 bytes"),
+        }
+    }
+
     /// The signature hash the witness implies, in one compression.
     pub fn sighash(&self) -> [u8; STATE_SIZE] {
-        compress(&self.h192, &final_block(&self.window))
+        compress(&self.h192, &self.final_block)
     }
 
     /// The length field, read out of the final block.
     pub fn bitcount(&self) -> u64 {
-        let b = final_block(&self.window);
-        u64::from_be_bytes(b[56..64].try_into().expect("8 bytes"))
+        u64::from_be_bytes(self.final_block[56..64].try_into().expect("8 bytes"))
+    }
+
+    /// The thirty bytes the one-compression check recovers.  Meaningful
+    /// only when the bitcount is the protocol's: it is what tells the
+    /// two 222-byte profiles apart.
+    pub fn window(&self) -> [u8; WINDOW_LEN] {
+        self.final_block[..WINDOW_LEN].try_into().expect("30 bytes")
     }
 }
 
@@ -94,10 +136,10 @@ pub fn read_profile<C: Verification>(
     if n != PROFILE_BITCOUNT {
         return Profile::WrongLength { bitcount: n };
     }
-    if &w.window == pinned_window {
+    if &w.window() == pinned_window {
         return Profile::CommittedToPinnedOutput;
     }
-    Profile::Published { window: w.window }
+    Profile::Published { window: w.window() }
 }
 
 /// Does M5 stand against this publisher?

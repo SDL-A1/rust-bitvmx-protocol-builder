@@ -84,11 +84,19 @@ mod tests {
             signing_message(&tx, 0, &Prevouts::All(&prevouts), Some(annex), None, ty).unwrap();
         let sh = sha256::Hash::hash(&msg).to_byte_array();
         let sig = secp.sign_schnorr_no_aux_rand(&Message::from_digest(sh), kp);
-        ProfileWitness {
-            signature: sig.serialize(),
-            h192: h192(&msg),
-            window: commitment_window(&msg),
-        }
+        ProfileWitness::for_message(sig.serialize(), &msg)
+    }
+
+    /// How long the message of a given profile is, with no annex.
+    fn w_len(
+        _secp: &Secp256k1<bitcoin::secp256k1::All>,
+        _kp: &Keypair,
+        ty: TapSighashType,
+    ) -> usize {
+        let (tx, prevouts) = stage_tx();
+        signing_message(&tx, 0, &Prevouts::All(&prevouts), None, None, ty)
+            .unwrap()
+            .len()
     }
 
     /// The same, for a profile whose message is not 222 bytes.
@@ -102,17 +110,9 @@ mod tests {
         assert_ne!(msg.len(), PROFILE_LEN);
         let sh = sha256::Hash::hash(&msg).to_byte_array();
         let sig = secp.sign_schnorr_no_aux_rand(&Message::from_digest(sh), kp);
-        // the disputer exhibits the real tail of the real message
-        let blocks = msg.len() / 64;
-        let boundary = blocks * 64;
-        let mut window = [0u8; WINDOW_LEN];
-        let tail = &msg[boundary..];
-        window[..tail.len().min(WINDOW_LEN)].copy_from_slice(&tail[..tail.len().min(WINDOW_LEN)]);
-        ProfileWitness {
-            signature: sig.serialize(),
-            h192: crate::compact::sha256_core::midstate_at(&msg, boundary),
-            window,
-        }
+        // the disputer exhibits the real final block of the real message,
+        // whatever shape its padding happens to take
+        ProfileWitness::for_message(sig.serialize(), &msg)
     }
 
     // ----------------------------------------------------------- M5
@@ -128,11 +128,11 @@ mod tests {
         let w = publish(&secp, &kp, &a, TapSighashType::AllPlusAnyoneCanPay);
         assert_eq!(
             read_profile(&secp, &w, &xonly, &pinned_window()),
-            Profile::Published { window: w.window }
+            Profile::Published { window: w.window() }
         );
         assert!(!m5_stands(&secp, &w, &xonly, &pinned_window()));
         // and the window carries the node value the protocol reads
-        assert_eq!(node_value_of(&w.window), node_value(&sf));
+        assert_eq!(node_value_of(&w.window()), node_value(&sf));
     }
 
     #[test]
@@ -166,17 +166,145 @@ mod tests {
             TapSighashType::SinglePlusAnyoneCanPay,
         ] {
             let w = publish_short(&secp, &kp, ty);
+            // The arm matters.  `NotHers` would also be a refutation, and
+            // accepting it here once hid a dead branch: the witness used
+            // to rebuild the final block with the protocol's own length
+            // field, so every one of these failed the signature check and
+            // `WrongLength` was unreachable.
             match read_profile(&secp, &w, &xonly, &pinned_window()) {
                 Profile::WrongLength { bitcount } => {
-                    assert_ne!(bitcount, PROFILE_BITCOUNT, "{ty:?}")
+                    assert_ne!(bitcount, PROFILE_BITCOUNT, "{ty:?}");
+                    assert_eq!(bitcount, 8 * w_len(&secp, &kp, ty) as u64, "{ty:?}");
                 }
-                // a truncated tail will usually fail the signature check,
-                // which is also a refutation
-                Profile::NotHers => {}
                 other => panic!("{ty:?} with no annex read as {other:?}"),
             }
             assert!(m5_stands(&secp, &w, &xonly, &pinned_window()), "{ty:?}");
         }
+    }
+
+    const HASH_TYPES: [TapSighashType; 7] = [
+        TapSighashType::Default,
+        TapSighashType::All,
+        TapSighashType::None,
+        TapSighashType::Single,
+        TapSighashType::AllPlusAnyoneCanPay,
+        TapSighashType::NonePlusAnyoneCanPay,
+        TapSighashType::SinglePlusAnyoneCanPay,
+    ];
+
+    /// SHA-256's final block for a message, taken rather than rebuilt.
+    fn final_block_of(msg: &[u8]) -> [u8; 64] {
+        ProfileWitness::for_message([0u8; 64], msg).final_block
+    }
+
+    #[test]
+    fn the_witness_is_one_hundred_and_sixty_bytes() {
+        assert_eq!(PROFILE_WITNESS_LEN, 160);
+        assert_eq!(PROFILE_WITNESS_LEN, 64 + 32 + 64);
+    }
+
+    /// Why the block is carried whole.
+    ///
+    /// `commitment::final_block` rebuilds it as
+    /// `window || 80 || 00^25 || 1776`, which is the final block of a
+    /// 222-byte message.  So the profiles it can reproduce are exactly
+    /// the two M5 must *not* convict, and none of the twelve it must --
+    /// including `ALL|ANYONECANPAY` with no annex, the spend M5 exists
+    /// to catch.  A witness in that layout refutes nothing.
+    #[test]
+    fn rebuilding_the_final_block_reproduces_only_what_m5_must_not_convict() {
+        let (tx, prevouts) = stage_tx();
+        let annex = annex_bytes(&publication(&children(0x55)));
+        let mut fits = 0;
+        let mut convictable_that_fit = 0;
+        let mut catch_fits = true;
+        for ty in HASH_TYPES {
+            for present in [false, true] {
+                let a = present.then_some(&annex[..]);
+                let msg = signing_message(&tx, 0, &Prevouts::All(&prevouts), a, None, ty).unwrap();
+                let f = final_block_of(&msg);
+                let shaped = f[WINDOW_LEN] == 0x80
+                    && f[WINDOW_LEN + 1..56].iter().all(|b| *b == 0)
+                    && u64::from_be_bytes(f[56..64].try_into().unwrap()) == PROFILE_BITCOUNT;
+                let bits = 8 * msg.len() as u64;
+                if shaped {
+                    fits += 1;
+                }
+                if shaped && bits != PROFILE_BITCOUNT {
+                    convictable_that_fit += 1;
+                }
+                if ty == TapSighashType::AllPlusAnyoneCanPay && !present {
+                    catch_fits = shaped;
+                }
+            }
+        }
+        assert_eq!(fits, 2, "the two 1776-bit profiles, and only those");
+        assert_eq!(
+            convictable_that_fit, 0,
+            "no profile M5 convicts can be written in the rebuilt layout"
+        );
+        assert!(
+            !catch_fits,
+            "ALL|ANYONECANPAY with no annex is the spend M5 catches; \
+             a layout that cannot express it refutes nothing"
+        );
+    }
+
+    /// The branch, alive.  It used to be unreachable.
+    #[test]
+    fn the_wrong_length_branch_fires_and_reports_the_real_bitcount() {
+        let secp = Secp256k1::new();
+        let kp = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[0x35; 32]).unwrap());
+        let (xonly, _) = kp.x_only_public_key();
+        let mut seen = std::collections::BTreeSet::new();
+        for ty in HASH_TYPES {
+            let w = publish_short(&secp, &kp, ty);
+            match read_profile(&secp, &w, &xonly, &pinned_window()) {
+                Profile::WrongLength { bitcount } => {
+                    assert_eq!(bitcount % 8, 0);
+                    assert_ne!(bitcount, PROFILE_BITCOUNT);
+                    seen.insert(bitcount);
+                }
+                other => panic!("{ty:?} read as {other:?}"),
+            }
+        }
+        // 1912, 1656, 1520 and 1264 across the seven: the length field
+        // really is a statement about the profile
+        assert!(seen.len() >= 3, "bitcounts seen: {seen:?}");
+    }
+
+    #[test]
+    fn a_forged_block_or_state_is_not_the_publishers() {
+        let secp = Secp256k1::new();
+        let kp = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[0x36; 32]).unwrap());
+        let (xonly, _) = kp.x_only_public_key();
+        let a = annex_bytes(&publication(&children(0x60)));
+        let good = publish(&secp, &kp, &a, TapSighashType::AllPlusAnyoneCanPay);
+        assert!(!m5_stands(&secp, &good, &xonly, &pinned_window()));
+
+        // lowering the length field would convict an honest publisher,
+        // if it did not also change the hash the signature is over
+        let mut lied = good.clone();
+        lied.final_block[56..64].copy_from_slice(&1520u64.to_be_bytes());
+        assert_eq!(
+            read_profile(&secp, &lied, &xonly, &pinned_window()),
+            Profile::NotHers
+        );
+
+        let mut moved = good.clone();
+        moved.final_block[WINDOW_LEN] = 0x00;
+        moved.final_block[WINDOW_LEN + 1] = 0x80;
+        assert_eq!(
+            read_profile(&secp, &moved, &xonly, &pinned_window()),
+            Profile::NotHers
+        );
+
+        let mut state = good.clone();
+        state.h192[0] ^= 1;
+        assert_eq!(
+            read_profile(&secp, &state, &xonly, &pinned_window()),
+            Profile::NotHers
+        );
     }
 
     #[test]
@@ -189,7 +317,7 @@ mod tests {
 
         // tamper with the window to make it look like the pinned output
         let mut forged = good.clone();
-        forged.window = pinned_window();
+        forged.final_block[..WINDOW_LEN].copy_from_slice(&pinned_window());
         assert_eq!(
             read_profile(&secp, &forged, &xonly, &pinned_window()),
             Profile::NotHers
