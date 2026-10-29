@@ -354,3 +354,298 @@ mod tests {
         }
     }
 }
+
+/// Publishing in an output instead of the annex.
+///
+/// The choice is made at setup because it changes the graph: an annex
+/// rides in the witness of the stage transaction, an output needs a
+/// transaction of its own, a penalization against it, and two outputs on
+/// the stage to fund both.
+#[cfg(test)]
+mod publishing_in_an_output {
+    use crate::compact::commitment::{
+        op_return_spk, signing_message, OUTPUT_PROFILE_LEN, SPEND_TYPE_OFFSET,
+    };
+    use crate::compact::dispute::{read_output_profile, OutputProfile, ProfileWitness};
+    use crate::compact::graph::*;
+    use bitcoin::hashes::{sha256, Hash};
+    use bitcoin::key::{Keypair, TapTweak};
+    use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
+    use bitcoin::sighash::Prevouts;
+    use bitcoin::{Amount, TapSighashType, TxOut};
+
+    fn keys() -> (Secp256k1<bitcoin::secp256k1::All>, Keypair) {
+        let secp = Secp256k1::new();
+        let kp = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[0x41; 32]).unwrap());
+        (secp, kp)
+    }
+
+    fn graphs() -> (Graph, Graph) {
+        let (secp, kp) = keys();
+        let (key, _) = kp.x_only_public_key();
+        (
+            Graph::build(&secp, &key, Params::default()),
+            Graph::build(&secp, &key, Params::default().publishing_in_an_output()),
+        )
+    }
+
+    #[test]
+    fn the_annex_graph_is_unchanged_and_the_output_graph_adds_two_per_stage() {
+        let (annex, output) = graphs();
+        let stages = Params::default().levels as usize + 1;
+        assert_eq!(
+            output.nodes.len() - annex.nodes.len(),
+            2 * stages,
+            "a StageData and a MissingData per stage"
+        );
+        for i in 1..=stages {
+            assert!(output
+                .nodes
+                .iter()
+                .any(|n| n.name == format!("StageData{i}")));
+            assert!(output
+                .nodes
+                .iter()
+                .any(|n| n.name == format!("MissingData{i}")));
+        }
+    }
+
+    #[test]
+    fn stage_data_has_two_inputs_and_the_op_return_at_the_signed_index() {
+        let (_, output) = graphs();
+        let sd = output.get("StageData1");
+        assert_eq!(sd.spends.len(), 2, "SINGLE on input 0, ALL on input 1");
+        assert_eq!(sd.slot_input, Some(0));
+        assert_eq!(sd.tx.output.len(), 1);
+        assert!(sd.tx.output[0].script_pubkey.is_op_return());
+        assert_eq!(sd.tx.output[0].value, Amount::ZERO);
+        // output 0 sits at the index of input 0, which is what
+        // SIGHASH_SINGLE commits to
+        assert_eq!(sd.slot_input.unwrap(), 0);
+    }
+
+    #[test]
+    fn the_two_inputs_come_from_the_stage_and_only_the_first_is_racing_a_timeout() {
+        let (_, output) = graphs();
+        let sd = output.get("StageData1");
+        let stage = output.get("Claim");
+        for (parent, _) in &sd.spends {
+            assert_eq!(parent, "Claim");
+        }
+        let roles: Vec<&Role> = sd
+            .spends
+            .iter()
+            .map(|(_, v)| &stage.outputs[*v].role)
+            .collect();
+        assert!(matches!(roles[0], Role::DataOut(1)));
+        assert!(matches!(roles[1], Role::DataFee(1)));
+        // MissingData races only for the first
+        let md = output.get("MissingData1");
+        assert_eq!(md.spends, vec![("Claim".to_string(), sd.spends[0].1)]);
+        assert!(stage.outputs[sd.spends[0].1]
+            .leaves
+            .iter()
+            .any(|l| matches!(l, Leaf::Timeout(_))));
+        assert!(!stage.outputs[sd.spends[1].1]
+            .leaves
+            .iter()
+            .any(|l| matches!(l, Leaf::Timeout(_))));
+    }
+
+    #[test]
+    fn the_graph_is_still_acyclic_and_every_input_points_somewhere() {
+        let (_, output) = graphs();
+        let mut seen: Vec<&str> = Vec::new();
+        for n in &output.nodes {
+            for (parent, vout) in &n.spends {
+                assert!(
+                    seen.contains(&parent.as_str()),
+                    "{} before {}",
+                    parent,
+                    n.name
+                );
+                assert!(*vout < output.get(parent).outputs.len());
+            }
+            seen.push(&n.name);
+        }
+    }
+
+    /// The whole point: a real signature, read by the real M5.
+    #[test]
+    fn a_real_single_signature_reads_as_a_publication() {
+        let (secp, kp) = keys();
+        let (key, _) = kp.x_only_public_key();
+        let g = Graph::build(&secp, &key, Params::default().publishing_in_an_output());
+        let sd = g.get("StageData1");
+        let stage = g.get("Claim");
+        let prevouts: Vec<TxOut> = sd
+            .spends
+            .iter()
+            .map(|(_, v)| stage.tx.output[*v].clone())
+            .collect();
+
+        let msg = signing_message(
+            &sd.tx,
+            0,
+            &Prevouts::All(&prevouts),
+            None,
+            None,
+            TapSighashType::Single,
+        )
+        .expect("signing message");
+        assert_eq!(msg.len(), OUTPUT_PROFILE_LEN, "the 239-byte profile");
+        assert_eq!(msg[SPEND_TYPE_OFFSET], 0, "a bare key-path spend");
+
+        let sighash = sha256::Hash::hash(&msg).to_byte_array();
+        let tweaked = kp.tap_tweak(&secp, None);
+        let sig =
+            secp.sign_schnorr_no_aux_rand(&Message::from_digest(sighash), &tweaked.to_keypair());
+        let w = ProfileWitness::for_message(sig.serialize(), &msg);
+        let (xonly, _) = tweaked.to_keypair().x_only_public_key();
+
+        // The window must be sha_single_output, not merely *a* window:
+        // checking only the variant would pass with the offsets wrong.
+        let mut ser = Vec::new();
+        bitcoin::consensus::Encodable::consensus_encode(&sd.tx.output[0], &mut ser).unwrap();
+        let sso = sha256::Hash::hash(&ser).to_byte_array();
+        match read_output_profile(&secp, &w, &xonly) {
+            OutputProfile::Published { window } => {
+                assert_eq!(window[..], sso[2..32], "the window is sha_single_output")
+            }
+            other => panic!("read as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn signing_at_the_wrong_input_index_commits_to_the_wrong_output() {
+        let (secp, kp) = keys();
+        let (key, _) = kp.x_only_public_key();
+        let g = Graph::build(&secp, &key, Params::default().publishing_in_an_output());
+        let sd = g.get("StageData1");
+        let stage = g.get("Claim");
+        let mut tx = sd.tx.clone();
+        // a second output for her to commit to instead
+        tx.output.push(TxOut {
+            value: Amount::from_sat(330),
+            script_pubkey: stage.tx.output[0].script_pubkey.clone(),
+        });
+        let prevouts: Vec<TxOut> = sd
+            .spends
+            .iter()
+            .map(|(_, v)| stage.tx.output[*v].clone())
+            .collect();
+        let msg = signing_message(
+            &tx,
+            1,
+            &Prevouts::All(&prevouts),
+            None,
+            None,
+            TapSighashType::Single,
+        )
+        .unwrap();
+        let tweaked = kp.tap_tweak(&secp, None);
+        let (xonly, _) = tweaked.to_keypair().x_only_public_key();
+        let sighash = sha256::Hash::hash(&msg).to_byte_array();
+        let sig =
+            secp.sign_schnorr_no_aux_rand(&Message::from_digest(sighash), &tweaked.to_keypair());
+        let w = ProfileWitness::for_message(sig.serialize(), &msg);
+        assert_eq!(
+            read_output_profile(&secp, &w, &xonly),
+            OutputProfile::WrongInputIndex { index: 1 }
+        );
+    }
+
+    #[test]
+    fn what_the_choice_costs() {
+        let (annex, output) = graphs();
+        let weight = |g: &Graph| -> u64 { g.nodes.iter().map(|n| n.tx.weight().to_wu()).sum() };
+        let (wa, wo) = (weight(&annex), weight(&output));
+        let stages = Params::default().levels as usize + 1;
+        let payload = Params::default().publication_bytes;
+
+        // the publication itself: four units a byte in an output,
+        // against one in an annex
+        let per_stage = (wo - wa) / stages as u64;
+        assert!(
+            per_stage > 4 * payload as u64,
+            "an output publication costs at least four units a byte: {per_stage}"
+        );
+        // and the furniture is small beside it
+        let furniture = per_stage - 4 * payload as u64;
+        assert!(
+            furniture < 1_200,
+            "the graph furniture should be under 1,200 WU a stage, got {furniture}"
+        );
+        println!(
+            "annex {wa} WU, output {wo} WU, {per_stage} a stage \
+             ({} payload + {furniture} furniture)",
+            4 * payload
+        );
+
+        // where the furniture goes, per stage
+        let w = |n: &str| output.get(n).tx.weight().to_wu();
+        let stage_delta =
+            output.get("Claim").tx.weight().to_wu() - annex.get("Claim").tx.weight().to_wu();
+        let sd = w("StageData1") - 4 * payload as u64;
+        let md = w("MissingData1");
+        println!(
+            "  two outputs on the stage {stage_delta}, StageData minus payload {sd}, \
+             MissingData {md} (a branch, not the happy path)"
+        );
+        assert_eq!(stage_delta + sd + md, furniture);
+        // What a run that goes well actually pays: the two outputs and
+        // StageData's own bytes.  MissingData is only ever broadcast
+        // when the publisher fails to publish.
+        assert_eq!(stage_delta + sd, 772, "the happy path's furniture");
+        assert_eq!(md, 376, "the penalization branch");
+        assert_eq!(stage_delta, 344, "two P2TR outputs on the stage");
+    }
+
+    #[test]
+    fn signing_all_instead_is_caught_by_the_five_bytes() {
+        let (secp, kp) = keys();
+        let (key, _) = kp.x_only_public_key();
+        let g = Graph::build(&secp, &key, Params::default().publishing_in_an_output());
+        let sd = g.get("StageData1");
+        let stage = g.get("Claim");
+        let prevouts: Vec<TxOut> = sd
+            .spends
+            .iter()
+            .map(|(_, v)| stage.tx.output[*v].clone())
+            .collect();
+        let tweaked = kp.tap_tweak(&secp, None);
+        let (xonly, _) = tweaked.to_keypair().x_only_public_key();
+
+        for (ty, want) in [
+            (TapSighashType::All, "every output"),
+            (TapSighashType::Default, "every output"),
+            (TapSighashType::None, "length"),
+            (TapSighashType::SinglePlusAnyoneCanPay, "length"),
+            (TapSighashType::AllPlusAnyoneCanPay, "length"),
+        ] {
+            let msg =
+                signing_message(&sd.tx, 0, &Prevouts::All(&prevouts), None, None, ty).unwrap();
+            let sighash = sha256::Hash::hash(&msg).to_byte_array();
+            let sig = secp
+                .sign_schnorr_no_aux_rand(&Message::from_digest(sighash), &tweaked.to_keypair());
+            let w = ProfileWitness::for_message(sig.serialize(), &msg);
+            match read_output_profile(&secp, &w, &xonly) {
+                OutputProfile::CommittedToEveryOutput => assert_eq!(want, "every output", "{ty:?}"),
+                OutputProfile::WrongLength { bitcount } => {
+                    assert_eq!(want, "length", "{ty:?}");
+                    assert_ne!(bitcount, 8 * OUTPUT_PROFILE_LEN as u64);
+                }
+                other => panic!("{ty:?} read as {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_op_return_carries_what_it_is_given() {
+        for n in [1usize, 40, 80, 1_000, 8_064] {
+            let spk = op_return_spk(&vec![0u8; n]);
+            assert!(spk.is_op_return());
+            assert!(spk.len() > n, "{n}");
+        }
+    }
+}

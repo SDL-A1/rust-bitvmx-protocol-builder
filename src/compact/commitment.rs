@@ -29,6 +29,54 @@ pub const WINDOW_START: usize = 192;
 /// How long it is.
 pub const WINDOW_LEN: usize = 30;
 
+// -- the annex-free alternative ----------------------------------------
+//
+// The same arithmetic, for a publication that rides in an `OP_RETURN`
+// output instead of the annex.  A plain `SIGHASH_SINGLE` key-path spend
+// commits to `sha_single_output` -- the hash of the output at the signed
+// input's index -- and its message is 239 bytes, so that digest is the
+// last 32 of the 47 the final block carries.  One compression again.
+//
+// What does *not* carry over is the argument that the length field alone
+// settles the profile: `SIGHASH_ALL` and `SIGHASH_DEFAULT` reach 239
+// bytes too, because `sha_outputs` and `sha_single_output` are both 32
+// bytes.  What separates them is where `spend_type || input_index` sits,
+// and the two layouts put those five bytes at opposite ends of the
+// block.  See `dispute::read_output_profile`.
+
+/// The signing-message length of a `SIGHASH_SINGLE` key-path spend.
+pub const OUTPUT_PROFILE_LEN: usize = 239;
+/// Its length field, in bits.
+pub const OUTPUT_PROFILE_BITCOUNT: u64 = 8 * OUTPUT_PROFILE_LEN as u64;
+/// Offset of `spend_type` in that message.  Zero for a bare key-path
+/// spend; 1 with an annex, 2 or 3 for a script path.
+pub const SPEND_TYPE_OFFSET: usize = 202;
+/// Offset of `input_index`, which `SIGHASH_SINGLE` makes load-bearing:
+/// it names the output the signature commits to.
+pub const INPUT_INDEX_OFFSET: usize = 203;
+/// `spend_type || input_index` for the spend the protocol requires --
+/// the five bytes a publisher does not choose, and which under
+/// `SIGHASH_ALL` land at the end of the message instead of the front.
+pub const CONSTANT_TAIL: [u8; 5] = [0; 5];
+/// Where the final block of a 239-byte message begins.  The same
+/// boundary as the annex profile's, by arithmetic rather than by
+/// coincidence: both messages are four blocks.
+pub const OUTPUT_FINAL_BLOCK_START: usize = 192;
+/// Offset, within that block, of the message's last five bytes -- not
+/// of the block's, which are SHA-256's length field.
+pub const CONSTANT_TAIL_OFFSET: usize =
+    OUTPUT_PROFILE_LEN - CONSTANT_TAIL.len() - OUTPUT_FINAL_BLOCK_START;
+/// Offset, within that block, of `sha_single_output`.
+pub const OUTPUT_DIGEST_OFFSET: usize = OUTPUT_PROFILE_LEN - 32 - OUTPUT_FINAL_BLOCK_START;
+
+/// `OP_RETURN <data>`, with the push the data's length demands.
+pub fn op_return_spk(data: &[u8]) -> bitcoin::ScriptBuf {
+    use bitcoin::opcodes::all::OP_RETURN;
+    let mut b = bitcoin::script::Builder::new().push_opcode(OP_RETURN);
+    b = b.push_slice::<&bitcoin::script::PushBytes>(data.try_into().expect("an OP_RETURN payload"));
+    b.into_script()
+}
+
 /// The 64 bytes a BIP340 tagged hash puts in front of its message.
 pub fn tap_sighash_tag() -> Vec<u8> {
     let t = sha256::Hash::hash(b"TapSighash").to_byte_array();

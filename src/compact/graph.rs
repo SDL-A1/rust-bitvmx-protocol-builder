@@ -43,6 +43,31 @@ pub enum Role {
     Dedup { level: usize, to: usize },
     /// The output a dispute creates for its answer.
     AnswerSlot,
+    /// Output publication only: what `StageData(i)` input 0 spends, and
+    /// what `MissingData(i)` takes if that transaction never confirms.
+    DataOut(usize),
+    /// Output publication only: what `StageData(i)` input 1 spends, so
+    /// that a `SIGHASH_ALL` signature can pin the transaction.
+    DataFee(usize),
+    /// The `OP_RETURN` carrying the dissection, at the index of the
+    /// input `SIGHASH_SINGLE` signs.
+    Publication { bytes: usize },
+}
+
+/// Where a stage's dissection goes.
+///
+/// Settled at setup, because it changes the transaction graph: an annex
+/// rides in the witness of the stage transaction itself, an output needs
+/// a transaction of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PublicationMode {
+    /// In the stage's own annex. One unit a byte, and Bitcoin Core will
+    /// not relay it.
+    #[default]
+    Annex,
+    /// In an `OP_RETURN` of a second transaction. Four units a byte, and
+    /// relayed today.
+    Output,
 }
 
 /// How an output may be spent.  One leaf per variant, plus the key path
@@ -190,12 +215,24 @@ pub struct Params {
     /// `SHA256(P_b)` for the endgame's release, fixed before any
     /// transaction is signed because it sits in the stake's script.
     pub h_b: [u8; 32],
+    /// Where the dissection goes.
+    pub mode: PublicationMode,
+    /// How big one is, in bytes. At `b = 192` a publication is 8,064.
+    pub publication_bytes: usize,
 }
 
 impl Params {
     /// The parameters of a dispute whose endgame releases `P_b`.
     pub fn with_release(self, h_b: [u8; 32]) -> Self {
         Params { h_b, ..self }
+    }
+
+    /// Publish in an `OP_RETURN` rather than in the annex.
+    pub fn publishing_in_an_output(self) -> Self {
+        Params {
+            mode: PublicationMode::Output,
+            ..self
+        }
     }
 }
 
@@ -208,6 +245,8 @@ impl Default for Params {
             // A stand-in until a dispute instance seals its own secret;
             // `Params::with_release` is what a real setup calls.
             h_b: [0u8; 32],
+            mode: PublicationMode::Annex,
+            publication_bytes: 8_064,
         }
     }
 }
@@ -327,7 +366,59 @@ impl Graph {
                     value: 50_000,
                 });
             }
+            // Publishing in an output: the stage carries the two outputs
+            // StageData(i) spends -- one for the SIGHASH_SINGLE input
+            // that makes the commitment, one for the SIGHASH_ALL input
+            // that pins the transaction.
+            if params.mode == PublicationMode::Output {
+                outs.push(Output {
+                    role: Role::DataOut(i),
+                    // key path for StageData, a timelocked leaf for
+                    // MissingData
+                    leaves: vec![Leaf::KeyPathPublication, Leaf::Timeout(params.delta)],
+                    value: DUST,
+                });
+                outs.push(Output {
+                    role: Role::DataFee(i),
+                    leaves: vec![Leaf::KeyPathPublication],
+                    value: DUST,
+                });
+            }
             g.push(secp, key, &name, spends, outs, Some(0));
+
+            if params.mode == PublicationMode::Output {
+                let dv = vout_of(&g, &name, |o| matches!(o.role, Role::DataOut(_)));
+                let fv = vout_of(&g, &name, |o| matches!(o.role, Role::DataFee(_)));
+                // The publication.  Output 0 sits at the index of input
+                // 0, which is what SIGHASH_SINGLE commits to.
+                g.push(
+                    secp,
+                    key,
+                    &format!("StageData{i}"),
+                    vec![(name.clone(), dv), (name.clone(), fv)],
+                    vec![Output {
+                        role: Role::Publication {
+                            bytes: params.publication_bytes,
+                        },
+                        leaves: vec![],
+                        value: 0,
+                    }],
+                    Some(0),
+                );
+                // and the penalization if it never confirms
+                g.push(
+                    secp,
+                    key,
+                    &format!("MissingData{i}"),
+                    vec![(name.clone(), dv)],
+                    vec![Output {
+                        role: Role::Stake,
+                        leaves: vec![Leaf::Cooperative],
+                        value: DUST,
+                    }],
+                    None,
+                );
+            }
 
             // the timeout that takes the stake if this stage is not answered
             let t = format!("Missing{}", i + 1);
@@ -459,15 +550,16 @@ impl Graph {
             .collect();
         let output: Vec<TxOut> = outputs
             .iter()
-            .map(|o| {
-                if o.leaves.is_empty() && o.value == 0 {
-                    TxOut {
-                        value: Amount::ZERO,
-                        script_pubkey: ScriptBuf::from_bytes(vec![0x6a]),
-                    }
-                } else {
-                    p2tr_out(secp, key, o)
-                }
+            .map(|o| match o.role {
+                Role::Publication { bytes } => TxOut {
+                    value: Amount::ZERO,
+                    script_pubkey: super::commitment::op_return_spk(&vec![0u8; bytes]),
+                },
+                _ if is_pinned(o) => TxOut {
+                    value: Amount::ZERO,
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x6a]),
+                },
+                _ => p2tr_out(secp, key, o),
             })
             .collect();
         let tx = Transaction {
@@ -488,7 +580,7 @@ impl Graph {
 
 /// Is this output the pinned `OP_RETURN` rather than a protocol output?
 pub fn is_pinned(o: &Output) -> bool {
-    o.leaves.is_empty() && o.value == 0
+    !matches!(o.role, Role::Publication { .. }) && o.leaves.is_empty() && o.value == 0
 }
 
 fn stage_name(i: usize, stages: usize) -> String {
@@ -518,6 +610,14 @@ fn slot_vout(i: usize) -> usize {
 
 fn sel_vout(_i: usize) -> usize {
     2
+}
+
+fn vout_of(g: &Graph, name: &str, pred: impl Fn(&Output) -> bool) -> usize {
+    g.get(name)
+        .outputs
+        .iter()
+        .position(pred)
+        .unwrap_or_else(|| panic!("no such output on {name}"))
 }
 
 fn sel_vout_of(g: &Graph, name: &str) -> usize {

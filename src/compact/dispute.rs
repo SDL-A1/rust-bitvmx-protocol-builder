@@ -12,7 +12,11 @@
 //! rests on -- that for *every* byte string an honest opponent can prove
 //! either an inclusion or a malformation -- is inherited, not rebuilt.
 
-use super::commitment::{PROFILE_BITCOUNT, WINDOW_LEN};
+use super::commitment::{
+    CONSTANT_TAIL, CONSTANT_TAIL_OFFSET, INPUT_INDEX_OFFSET, OUTPUT_DIGEST_OFFSET,
+    OUTPUT_FINAL_BLOCK_START, OUTPUT_PROFILE_BITCOUNT, PROFILE_BITCOUNT, SPEND_TYPE_OFFSET,
+    WINDOW_LEN,
+};
 use super::flatmerkle::{verify_proof, Frame, Proof};
 use super::messages::MCode;
 use super::sha256_core::{compress, midstate_at, BLOCK_SIZE, STATE_SIZE};
@@ -108,6 +112,99 @@ impl ProfileWitness {
     pub fn window(&self) -> [u8; WINDOW_LEN] {
         self.final_block[..WINDOW_LEN].try_into().expect("30 bytes")
     }
+}
+
+/// What a profile witness says about an *output* publication.
+///
+/// The annex reading of `read_profile` turns on the length field: of the
+/// fourteen combinations exactly two reach 1776 bits and both carry an
+/// annex.  That does not transplant.  `SIGHASH_SINGLE`, `SIGHASH_ALL`
+/// and `SIGHASH_DEFAULT` all give 239-byte messages, because
+/// `sha_outputs` and `sha_single_output` are both 32 bytes.
+///
+/// What separates them is where the constants sit.  Both layouts agree
+/// to byte 202; after that `SINGLE` writes `spend_type`, `input_index`
+/// and then the digest, while `ALL` writes the digest and then
+/// `spend_type` and `input_index`.  The same five bytes, slid 32 along.
+/// They are the only part of either layout the publisher does not
+/// choose, so the test is where they are, not what they are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutputProfile {
+    /// A `SIGHASH_SINGLE` key-path spend at the pinned input index: the
+    /// window is `sha_single_output`, and this is a genuine publication.
+    Published { window: [u8; WINDOW_LEN] },
+    /// Not 239 bytes: `NONE`, or any `ANYONECANPAY` variant, or an annex.
+    WrongLength { bitcount: u64 },
+    /// The constants are at the *end* of the block, so she committed to
+    /// every output rather than to the one carrying the file.
+    CommittedToEveryOutput,
+    /// `spend_type` is not zero: an annex, or a script-path spend.
+    NotABareKeyPath { spend_type: u8 },
+    /// Signed at an input whose index is not the pinned one, so
+    /// `SIGHASH_SINGLE` commits to some other output.
+    WrongInputIndex { index: u32 },
+    /// The witness is not the publisher's.
+    NotHers,
+}
+
+/// Read the profile of an output publication.
+///
+/// Every clause reads the final block, which the witness carries anyway,
+/// so this is one compression and four comparisons.
+pub fn read_output_profile<C: Verification>(
+    secp: &Secp256k1<C>,
+    w: &ProfileWitness,
+    slot_key: &XOnlyPublicKey,
+) -> OutputProfile {
+    let sig = match schnorr::Signature::from_slice(&w.signature) {
+        Ok(s) => s,
+        Err(_) => return OutputProfile::NotHers,
+    };
+    if secp
+        .verify_schnorr(&sig, &Message::from_digest(w.sighash()), slot_key)
+        .is_err()
+    {
+        return OutputProfile::NotHers;
+    }
+    // From here the block is the true final block of the true message.
+    let n = w.bitcount();
+    if n != OUTPUT_PROFILE_BITCOUNT {
+        return OutputProfile::WrongLength { bitcount: n };
+    }
+    // The message's last five bytes, not the block's -- the block ends
+    // in SHA-256's length field.
+    if w.final_block[CONSTANT_TAIL_OFFSET..CONSTANT_TAIL_OFFSET + CONSTANT_TAIL.len()]
+        == CONSTANT_TAIL
+    {
+        return OutputProfile::CommittedToEveryOutput;
+    }
+    let st = w.final_block[SPEND_TYPE_OFFSET - OUTPUT_FINAL_BLOCK_START];
+    if st != 0 {
+        return OutputProfile::NotABareKeyPath { spend_type: st };
+    }
+    let lo = INPUT_INDEX_OFFSET - OUTPUT_FINAL_BLOCK_START;
+    let idx = u32::from_le_bytes(w.final_block[lo..lo + 4].try_into().expect("4 bytes"));
+    if idx != 0 {
+        return OutputProfile::WrongInputIndex { index: idx };
+    }
+    OutputProfile::Published {
+        window: w.final_block[OUTPUT_DIGEST_OFFSET + 2..OUTPUT_DIGEST_OFFSET + 2 + WINDOW_LEN]
+            .try_into()
+            .expect("30 bytes"),
+    }
+}
+
+/// M5, for a publication in an output: the disputer wins unless the
+/// witness reads as a publication.
+pub fn m5_output_stands<C: Verification>(
+    secp: &Secp256k1<C>,
+    w: &ProfileWitness,
+    slot_key: &XOnlyPublicKey,
+) -> bool {
+    !matches!(
+        read_output_profile(secp, w, slot_key),
+        OutputProfile::Published { .. }
+    )
 }
 
 /// Read the profile a publisher used.

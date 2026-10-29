@@ -97,7 +97,32 @@ That was the source model's own count, in which a multi-way multiplexer
 costs a full table; it is not comparable to an AND-gate figure and should
 not have been written down next to one.
 
-## 3. Deduplication is specified but not built
+## 3. Both publication modes build; only the annex has been to a node
+
+`Params::publishing_in_an_output()` switches the graph from an annex
+publication to an `OP_RETURN` one: every stage gains a `DataOut` and a
+`DataFee` output, a `StageData` spends both -- `SIGHASH_SINGLE` on input
+0 for the commitment, `SIGHASH_ALL` on input 1 to pin the transaction --
+and a `MissingData` races the first.  `dispute::read_output_profile` is
+M5 for that profile, four clauses, all inside the one final block the
+witness already carries.
+
+What has *not* happened is the regtest leg.  `tests/annex_regtest.rs`
+takes an annex publication to a real `bitcoind`; there is no equivalent
+for the output mode, which would be worth having precisely because the
+output mode is the one a node will actually relay.
+
+- [ ] A regtest test that mines a `StageData` with both signatures and
+      checks the node accepts it
+- [ ] The same for `MissingData` after the timelock
+
+Weighing the two graphs is how the paper's furniture figure was
+corrected, from 401 WU to 772 a stage plus 376 on the penalization
+branch.  The first number came from counting one output and one input;
+there are two of each, plus StageData's overhead and a whole
+MissingData.
+
+## 4. Deduplication is specified but not built
 
 Several challengers selecting the same node can be answered once. The
 graph shape for it is settled -- a single stage transaction with one
