@@ -150,14 +150,13 @@ impl MerkleMemory {
 /// Which slots one instruction touches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pattern {
-    /// Four scattered slots: a straddling fetch and a straddling access.
-    /// The bound the protocol must budget for.
+    /// The reachable pattern that maximises the multiproof.
     Worst,
-    /// A register-only instruction: fetch plus the register block.
+    /// A register-only instruction: fetch plus rs1, rs2, rd.
     Alu,
-    /// Fetch, a straddling data read, and the destination register.
+    /// Fetch, an aligned data read, and rs1, rd.
     Load,
-    /// Fetch, the source registers, and a straddling data write.
+    /// Fetch, an aligned data write, and rs1, rs2.
     Store,
 }
 
@@ -166,12 +165,21 @@ pub const REG_SLOTS: usize = 4;
 
 /// The slots an instruction of this shape touches, given a program
 /// counter slot and a data slot.
+///
+/// Nothing straddles.  BitVMX-CPU rejects unaligned reads, writes and jumps
+/// outright, so every fetch and every load or store is a four-byte aligned
+/// word lying wholly inside one slot.  An earlier version of this function
+/// built `data, data + 1` pairs and a `Worst` of two straddling pairs, and
+/// measured a bound the machine cannot reach.
+///
+/// RISC-V is load/store, so no instruction both touches memory and names
+/// three registers: four touched slots is the maximum, not five.
 pub fn touched(p: Pattern, pc: usize, data: usize, regs: [usize; 3]) -> Vec<usize> {
     let mut v: Vec<usize> = match p {
-        Pattern::Worst => vec![pc, pc + 1, data, data + 1],
+        Pattern::Worst => vec![regs[0], regs[2], pc, data],
         Pattern::Alu => vec![pc, regs[0], regs[1], regs[2]],
-        Pattern::Load => vec![pc, data, data + 1, regs[0], regs[2]],
-        Pattern::Store => vec![pc, regs[0], regs[1], data, data + 1],
+        Pattern::Load => vec![pc, data, regs[0], regs[2]],
+        Pattern::Store => vec![pc, regs[0], regs[1], data],
     };
     v.sort_unstable();
     v.dedup();
