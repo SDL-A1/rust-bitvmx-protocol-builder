@@ -95,6 +95,53 @@ mod tests {
         }
     }
 
+    /// The check that was missing, and whose absence let `packed_position`
+    /// disagree with the packing for as long as there was no packing.
+    #[test]
+    fn pack_round_trips_through_packed_position() {
+        let states: Vec<checkpoints::Node> =
+            (0..11u8).map(|i| [i.wrapping_mul(17); NODE_BYTES]).collect();
+        let elements = checkpoints::pack(&states);
+
+        assert_eq!(elements.len(), 11usize.div_ceil(PER_ELEMENT));
+        for e in &elements {
+            assert_eq!(e.len(), 64, "every element is one block");
+        }
+
+        assert_eq!(checkpoints::unpack(&elements, states.len()), states);
+
+        // And the position the dispute reads an opening at is where the
+        // packing put it.
+        for (t, want) in states.iter().enumerate() {
+            let (elem, off) = checkpoints::packed_position(t);
+            assert_eq!(
+                &elements[elem][off..off + NODE_BYTES],
+                &want[..],
+                "state {} is not where packed_position says",
+                t
+            );
+        }
+    }
+
+    /// The states fit a block with room to spare, and the spare is zero.
+    #[test]
+    fn a_full_element_pads_with_four_zero_bytes() {
+        let states: Vec<checkpoints::Node> = (0..3u8).map(|i| [i + 1; NODE_BYTES]).collect();
+        let e = &checkpoints::pack(&states)[0];
+        assert_eq!(&e[60..], &[0u8; 4], "four spare bytes, zeroed");
+    }
+
+    /// A short last element is padded the same way, which is the ordinary
+    /// case now that a stage publishes `b - 1` states rather than `b`.
+    #[test]
+    fn a_short_last_element_is_zero_padded() {
+        let states: Vec<checkpoints::Node> = (0..4u8).map(|i| [i + 1; NODE_BYTES]).collect();
+        let els = checkpoints::pack(&states);
+        assert_eq!(els.len(), 2);
+        assert_eq!(&els[1][..NODE_BYTES], &[4u8; NODE_BYTES]);
+        assert_eq!(&els[1][NODE_BYTES..], &[0u8; 64 - NODE_BYTES]);
+    }
+
     #[test]
     fn a_192_way_dissection_fills_64_elements() {
         assert_eq!(checkpoints::interior_states(192), 191);

@@ -5,7 +5,7 @@ mod tests {
     use crate::compact::annex::annex_bytes;
     use crate::compact::commitment::{serialize_output, signing_message, PROFILE_LEN};
     use crate::compact::graph::{is_pinned, Graph, Leaf, Params, Role, TxNode};
-    use crate::compact::tracetree::{publication, Node, NODE_BYTES};
+    use crate::compact::checkpoints::{publication, Node, NODE_BYTES};
     use bitcoin::hashes::Hash;
     use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
     use bitcoin::sighash::Prevouts;
@@ -110,8 +110,10 @@ mod tests {
             let bare = n.txid();
 
             // publish something in the annex
-            let kids: Vec<Node> = (0..12u8).map(|i| [i; NODE_BYTES]).collect();
-            let sf = publication(&kids);
+            // Twelve interior states: the dissection of a b = 13 interval, which
+            // is the smallest feasible one (four elements, a power of two).
+            let states: Vec<Node> = (0..12u8).map(|i| [i; NODE_BYTES]).collect();
+            let sf = publication(&states);
             let a = annex_bytes(&sf);
             let mut with = n.tx.clone();
             let mut w = Witness::new();
@@ -331,8 +333,8 @@ mod tests {
     #[test]
     fn signing_a_real_slot_input_gives_the_222_byte_profile() {
         let (g, secp, key) = graph();
-        let kids: Vec<Node> = (0..12u8).map(|i| [i; NODE_BYTES]).collect();
-        let a = annex_bytes(&publication(&kids));
+        let states: Vec<Node> = (0..12u8).map(|i| [i; NODE_BYTES]).collect();
+        let a = annex_bytes(&publication(&states));
 
         for name in stage_names(g.params.levels) {
             let n = g.get(&name);
@@ -352,6 +354,128 @@ mod tests {
             }
             let _ = (&secp, &key);
         }
+    }
+
+    // ------------------------------------------- the gadget's release leaf
+
+    fn gadget_params() -> (Params, XOnlyPublicKey) {
+        let secp = Secp256k1::new();
+        let kp = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[0x5A; 32]).unwrap());
+        let (gk, _) = kp.x_only_public_key();
+        (Params::default().with_gadget(gk), gk)
+    }
+
+    /// The choice of release does not reshape the graph.  One leaf either
+    /// way, same outputs, same txids downstream.
+    #[test]
+    fn the_gadget_release_does_not_move_the_graph() {
+        let secp = Secp256k1::new();
+        let kp = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[0x77; 32]).unwrap());
+        let (key, _) = kp.x_only_public_key();
+        let (gp, gk) = gadget_params();
+
+        let a = Graph::build(&secp, &key, Params::default());
+        let b = Graph::build(&secp, &key, gp);
+
+        assert_eq!(a.nodes.len(), b.nodes.len());
+        for (x, y) in a.nodes.iter().zip(&b.nodes) {
+            assert_eq!(x.name, y.name);
+            assert_eq!(
+                x.tx.output.len(),
+                y.tx.output.len(),
+                "{} changed shape",
+                x.name
+            );
+        }
+
+        // The stake still carries exactly two leaves, and the release one
+        // is now the gadget's.
+        let stake = b
+            .get("Setup")
+            .outputs
+            .iter()
+            .find(|o| o.role == Role::Stake)
+            .expect("a stake");
+        assert_eq!(stake.leaves.len(), 2);
+        assert!(stake.leaves.contains(&Leaf::Cooperative));
+        assert!(stake.leaves.contains(&Leaf::GadgetRelease { key: gk }));
+        assert!(!stake
+            .leaves
+            .iter()
+            .any(|l| matches!(l, Leaf::PreimageRelease { .. })));
+    }
+
+    /// The gadget's key is its own.  Reusing the protocol key would let
+    /// one signature serve two purposes.
+    #[test]
+    fn the_gadget_leaf_checks_its_own_key() {
+        let secp = Secp256k1::new();
+        let kp = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[0x77; 32]).unwrap());
+        let (key, _) = kp.x_only_public_key();
+        let (_, gk) = gadget_params();
+        assert_ne!(key, gk, "the fixture is only meaningful with two keys");
+
+        let script = crate::compact::graph::Output::release_script(
+            &Leaf::GadgetRelease { key: gk },
+            &key,
+        );
+        let bytes = script.as_bytes();
+        assert_eq!(bytes.len(), 34, "<32-byte key> CHECKSIG");
+        assert_eq!(bytes[0], 32, "a 32-byte push");
+        assert_eq!(&bytes[1..33], &gk.serialize()[..], "the gadget's key");
+        assert!(
+            !script.to_bytes().windows(32).any(|w| w == key.serialize()),
+            "the protocol key must not appear in the gadget leaf"
+        );
+    }
+
+    /// What C04's resolution costs on chain.  The companion note declined
+    /// to claim this -- "probably a small saving; not measured" -- so here
+    /// it is measured.
+    #[test]
+    fn what_the_gadget_release_saves_on_chain() {
+        let secp = Secp256k1::new();
+        let kp = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[0x77; 32]).unwrap());
+        let (key, _) = kp.x_only_public_key();
+        let (_, gk) = gadget_params();
+
+        let preimage = crate::compact::graph::Output::release_script(
+            &Leaf::PreimageRelease { h_b: [0xAB; 32] },
+            &key,
+        );
+        let gadget = crate::compact::graph::Output::release_script(
+            &Leaf::GadgetRelease { key: gk },
+            &key,
+        );
+        assert_eq!(preimage.as_bytes().len(), 69, "SHA256 <h_b> EQUALVERIFY <P> CHECKSIG");
+        assert_eq!(gadget.as_bytes().len(), 34, "<P_g> CHECKSIG");
+
+        // The witness each is spent with.  Both take one 64-byte Schnorr
+        // signature and a control block; the preimage leaf additionally
+        // pushes the 32-byte secret, and carries a 35-byte longer script.
+        let control = [0u8; 33]; // one leaf deep; the depth is the same either way
+        let mut w_pre = Witness::new();
+        w_pre.push([0u8; 64]);
+        w_pre.push([0u8; 32]);
+        w_pre.push(preimage.as_bytes());
+        w_pre.push(control);
+
+        let mut w_gad = Witness::new();
+        w_gad.push([0u8; 64]);
+        w_gad.push(gadget.as_bytes());
+        w_gad.push(control);
+
+        let saved = w_pre.size() - w_gad.size();
+        // 33 for the pushed preimage and its length byte, plus 35 for the
+        // shorter script.  The item count stays one byte at three items or
+        // four, so it contributes nothing.
+        assert_eq!(saved, 33 + 35);
+        assert_eq!(saved, 68, "witness bytes, so 68 WU");
+        println!(
+            "preimage release {} witness bytes, gadget {} -- {saved} WU saved",
+            w_pre.size(),
+            w_gad.size()
+        );
     }
 }
 
