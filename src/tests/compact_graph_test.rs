@@ -461,6 +461,70 @@ mod tests {
         }
     }
 
+    // ------------------------------- C08: one key per slot, and why
+
+    /// The binding M4's profile witness has, and the only one it has.
+    ///
+    /// Two slots spent the same way give signature-hash messages whose
+    /// final blocks are identical, so the window M4 reads names no slot.
+    /// The chaining state is what differs and the disputer supplies it.
+    /// Therefore the verifying key is the whole binding, and it has to be
+    /// per-slot or a signature from one slot is offerable about another.
+    #[test]
+    fn every_publication_slot_has_its_own_key() {
+        use crate::compact::graph::output_key;
+        let (g, secp, key) = graph();
+
+        let slots: Vec<usize> = g
+            .nodes
+            .iter()
+            .flat_map(|n| &n.outputs)
+            .filter_map(|o| match o.role {
+                Role::Slot(i) => Some(i),
+                _ => None,
+            })
+            .collect();
+        assert!(slots.len() >= 5, "a slot per stage: {slots:?}");
+
+        let keys: Vec<XOnlyPublicKey> = slots
+            .iter()
+            .map(|i| output_key(&secp, &key, &Role::Slot(*i)))
+            .collect();
+
+        for (a, i) in keys.iter().zip(&slots) {
+            assert_ne!(*a, key, "slot {i} reuses the base key");
+            for (b, j) in keys.iter().zip(&slots) {
+                if i != j {
+                    assert_ne!(a, b, "slots {i} and {j} share a key");
+                }
+            }
+        }
+    }
+
+    /// Derived, not independent, so setup stays one key per party and both
+    /// sides compute every slot key without an extra exchange.
+    #[test]
+    fn slot_keys_are_a_public_function_of_the_stage() {
+        use crate::compact::graph::output_key;
+        let secp = Secp256k1::new();
+        let kp = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[0x77; 32]).unwrap());
+        let (key, _) = kp.x_only_public_key();
+
+        // Anyone who knows the base key and the stage index gets the same
+        // answer, every time.
+        for i in 1..=5usize {
+            let a = output_key(&secp, &key, &Role::Slot(i));
+            let b = output_key(&secp, &key, &Role::Slot(i));
+            assert_eq!(a, b, "slot {i} is not deterministic");
+        }
+
+        // And only slots are tweaked; everything else keeps the base key,
+        // because nothing else is read by a profile witness.
+        for r in [Role::Stake, Role::Bond, Role::AnswerSlot] {
+            assert_eq!(output_key(&secp, &key, &r), key, "{r:?} should not move");
+        }
+    }
+
     // ------------------------------------------- the gadget's release leaf
 
     fn gadget_params() -> (Params, XOnlyPublicKey) {

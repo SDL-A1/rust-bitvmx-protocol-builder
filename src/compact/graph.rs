@@ -297,8 +297,42 @@ pub struct Graph {
 fn p2tr_out<C: Verification>(secp: &Secp256k1<C>, key: &XOnlyPublicKey, o: &Output) -> TxOut {
     TxOut {
         value: Amount::from_sat(o.value),
-        script_pubkey: o.script_pubkey(secp, key),
+        script_pubkey: o.script_pubkey(secp, &output_key(secp, key, &o.role)),
     }
+}
+
+/// The key an output is spent under.
+///
+/// A publication slot gets its own, and that is not a refinement: it is
+/// the whole of what binds M4's profile witness to the slot it is about.
+/// Two slots of the same publisher, spent with the same annex and hash
+/// type, produce signature-hash messages that differ only in their first
+/// $192$ bytes -- so their final blocks are *identical* and the window M4
+/// reads names no slot at all.  The chaining state is what differs, and
+/// the disputer supplies that.  With one key over several slots a
+/// signature from one is offerable about another; with a key per slot it
+/// verifies under neither but its own.  This is the review's C08.
+///
+/// Derived rather than independent so that setup stays one key per party:
+/// a BIP341-style tweak by the role's label, which is a public function
+/// of the stage index, so both parties compute every slot key without an
+/// extra exchange.
+pub fn output_key<C: Verification>(
+    secp: &Secp256k1<C>,
+    base: &XOnlyPublicKey,
+    role: &Role,
+) -> XOnlyPublicKey {
+    let Role::Slot(i) = role else {
+        return *base;
+    };
+    use bitcoin::hashes::{sha256, Hash, HashEngine};
+    let mut e = sha256::Hash::engine();
+    e.input(b"compact-bitvmx/slot-key");
+    e.input(&(*i as u32).to_be_bytes());
+    e.input(&base.serialize());
+    let t = sha256::Hash::from_engine(e).to_byte_array();
+    let scalar = bitcoin::secp256k1::Scalar::from_be_bytes(t).expect("in range");
+    base.add_tweak(secp, &scalar).expect("tweak").0
 }
 
 /// A bare `OP_RETURN` of value zero, pinned at the slot input's index so
