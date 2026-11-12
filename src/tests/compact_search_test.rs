@@ -6,7 +6,8 @@
 #[cfg(test)]
 mod tests {
     use crate::compact::search::{
-        boundary, levels, run, select, Interval, Outcome, Party, SearchError, State,
+        boundary, levels, published_states, run, select, Interval, Outcome, Party,
+        SearchError, State,
     };
 
     fn st(n: u8) -> State {
@@ -150,6 +151,65 @@ mod tests {
         assert_eq!(stages[0].sender, Party::Prover);
         for w in stages.windows(2) {
             assert_ne!(w[0].sender, w[1].sender, "stages alternate");
+        }
+    }
+
+    // --- the publication layer, which the selection is taken against ---
+
+    /// The reason `run` builds the file rather than leaving it to the
+    /// caller: a selection is only sound if it is taken against the bytes
+    /// the stage committed to, not against states recomputed alongside.
+    ///
+    /// So the states read back out of the published file must be the
+    /// sender's own states at the interior points -- and this is the only
+    /// place that round trip is closed, from a trace through `pack`,
+    /// FlatMerkle and back.
+    #[test]
+    fn a_stage_publishes_the_states_the_counterparty_selects_against() {
+        let steps = 64;
+        let b = 8;
+        let p = honest(steps);
+        let c = trace(steps, 37, 0xEE);
+        let (stages, _) = run(&p, &c, b).expect("a dispute");
+
+        for st in &stages {
+            let own = match st.sender {
+                Party::Prover => &p,
+                Party::Challenger => &c,
+            };
+            let want: Vec<State> =
+                st.interval.points(b).iter().map(|&t| own[t]).collect();
+            assert_eq!(
+                published_states(st, b),
+                want,
+                "stage {} published something other than its own interior states",
+                st.index
+            );
+        }
+    }
+
+    /// And the file is a real FlatMerkle commitment, not a container: its
+    /// digest moves when any published state does.
+    #[test]
+    fn the_digest_binds_every_published_state() {
+        let steps = 64;
+        let b = 8;
+        let p = honest(steps);
+        let c = trace(steps, 37, 0xEE);
+        let (stages, _) = run(&p, &c, b).expect("a dispute");
+
+        let base = stages[0].publication.digest;
+        let states = published_states(&stages[0], b);
+        assert_eq!(states.len(), b - 1, "the interior states, and only those");
+
+        for i in 0..states.len() {
+            let mut altered = states.clone();
+            altered[i][0] ^= 1;
+            let moved = crate::compact::checkpoints::publication(&altered).digest;
+            assert_ne!(
+                moved, base,
+                "flipping state {i} left the digest alone, so it is not bound"
+            );
         }
     }
 

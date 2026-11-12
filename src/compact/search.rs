@@ -22,6 +22,7 @@
 //!     interior states here mean the disagreement is in the last
 //!     subinterval, against the inherited upper endpoint.
 
+use super::checkpoints::publication;
 use super::flatmerkle::StructuredFile;
 use super::memory::NODE;
 
@@ -123,7 +124,16 @@ pub struct Stage {
     pub sender: Party,
     pub selection: Option<usize>,
     pub interval: Interval,
-    pub publication: Option<StructuredFile>,
+    /// The file this stage puts in its annex: the FlatMerkle commitment
+    /// to the `b - 1` interior states of `interval`'s dissection, under
+    /// the sender's own trace.
+    ///
+    /// Built here rather than left to the caller.  It was left to the
+    /// caller while `checkpoints` had no builder, and a model whose
+    /// publications are all `None` cannot check the one property the
+    /// search turns on -- that what a stage commits to is what the
+    /// counterparty selects against.
+    pub publication: StructuredFile,
 }
 
 /// What the search produced.
@@ -202,12 +212,16 @@ pub fn run(
             iv = prev.interval.subinterval(b, k);
             Some(k)
         };
+        // What this sender publishes: its own states at the interior
+        // points of the interval it just selected into.
+        let own_states: Vec<State> =
+            iv.points(b).iter().map(|&t| trace(sender)[t]).collect();
         stages.push(Stage {
             index: i,
             sender,
             selection,
             interval: iv,
-            publication: None, // the caller builds the file; see `checkpoints`
+            publication: publication(&own_states),
         });
     }
 
@@ -253,4 +267,18 @@ pub fn boundary(prover: &[State], challenger: &[State], out: &Outcome) -> Bounda
         prover_post: prover[j + 1],
         challenger_post: challenger[j + 1],
     }
+}
+
+/// The states a stage published, read back out of its file.
+///
+/// This is what the counterparty selects against, and reading it back
+/// rather than recomputing it is the point: a selection is only sound if
+/// it is taken against the committed bytes.
+pub fn published_states(st: &Stage, b: usize) -> Vec<State> {
+    super::checkpoints::unpack(&st.publication.elements, interior(b))
+}
+
+/// The number of interior states a `b`-way dissection publishes.
+pub fn interior(b: usize) -> usize {
+    super::checkpoints::interior_states(b)
 }

@@ -11,7 +11,7 @@
 //! change costs nothing.
 
 use super::annex::annex_frame;
-use super::flatmerkle::{build, total_raw_len, StructuredFile};
+use super::flatmerkle::{build, total_raw_len, StructuredFile, MIN_ELEMENTS};
 use super::sha256_core::BLOCK_SIZE;
 
 /// A state hash is twenty bytes.
@@ -127,6 +127,15 @@ pub fn unpack(elements: &[Vec<u8>], n: usize) -> Vec<Node> {
 /// some other publication listed.  Nothing lists this one.  The digest is
 /// what the stage's own signature commits to and that is the end of it.
 pub fn publication(states: &[Node]) -> StructuredFile {
-    let elements = pack(states);
+    let mut elements = pack(states);
+    // FlatMerkle takes a power of two elements, at least four.  For every
+    // `b` the cost model admits this is already true -- `feasible(b)` is
+    // exactly that condition -- so the padding below never fires in the
+    // protocol.  It fires for the small dissections the search tests use,
+    // which exercise the selection logic at `b = 4` and `b = 8` where a
+    // real deployment would never sit, and without it the model could not
+    // build a publication for them at all.
+    let want = elements.len().max(MIN_ELEMENTS).next_power_of_two();
+    elements.resize(want, vec![0u8; BLOCK_SIZE]);
     build(&elements, annex_frame(elements.len()))
 }
