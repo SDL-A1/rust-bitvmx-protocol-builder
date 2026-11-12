@@ -628,7 +628,6 @@ mod publishing_in_an_output {
     use bitcoin::key::{Keypair, TapTweak};
     use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
     use bitcoin::sighash::Prevouts;
-    use bitcoin::taproot::LeafVersion;
     use bitcoin::{Amount, TapSighashType, TxOut};
 
     fn keys() -> (Secp256k1<bitcoin::secp256k1::All>, Keypair) {

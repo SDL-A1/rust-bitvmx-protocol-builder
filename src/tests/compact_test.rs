@@ -485,7 +485,6 @@ mod witness_accounting {
 #[cfg(test)]
 mod openings {
     use crate::compact::annex::*;
-    use crate::compact::commitment::*;
     use crate::compact::flatmerkle::*;
     use crate::compact::sha256_core::*;
     use bitcoin::hashes::{sha256, Hash};
