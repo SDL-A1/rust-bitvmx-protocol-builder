@@ -21,6 +21,7 @@ pub mod garble;
 pub mod memory;
 pub mod output;
 pub mod release;
+pub mod search;
 pub mod sha256_core;
 
 // Out of the build, not deleted.  `search.rs` walks a TraceTree and
@@ -31,4 +32,3 @@ pub mod sha256_core;
 // wanted, and retyping them from memory is how detail gets lost.
 //
 //   pub mod dispute;
-//   pub mod search;

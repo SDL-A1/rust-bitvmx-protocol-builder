@@ -3,6 +3,7 @@ pub mod builder_connection_test;
 pub mod builder_outputs_test;
 pub mod builder_persistance_test;
 pub mod compact_fraud_test;
+pub mod compact_search_test;
 pub mod compact_test;
 
 // Out of the build with the trace-tree layer they exercise.  These are not
@@ -16,7 +17,7 @@ pub mod compact_test;
 //   pub mod compact_dispute_test;    // 20 tests, M-codes and tracetree
 //   pub mod compact_endgame_test;    // 16 tests, uses compact::messages
 //   pub mod compact_graph_test;      // 23 tests, the stage graph itself
-//   pub mod compact_search_test;     // 15 tests, walks a TraceTree
+
 pub mod graph_test;
 pub mod input_test;
 pub mod ots_checksig;

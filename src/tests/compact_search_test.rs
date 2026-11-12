@@ -1,275 +1,180 @@
-//! The search, end to end, against traces that diverge at a known step.
+//! The interval search of Compact BitVMX II.
 //!
-//! This is the property the whole construction exists to deliver: given
-//! two executions that agree up to step `f - 1` and differ at `f`, the
-//! search must name exactly `f`, in `L + 1` transactions, whatever `f`
-//! is.  Nothing here is asserted from the algebra -- every run builds two
-//! real trace trees over real FlatMerkle publications and descends them.
-
+//! Replaces the trace-tree suite of the same name.  The cases that matter
+//! are the ones the tree could not handle: equal interior vectors, and a
+//! disagreement that falls in the last subinterval.
 #[cfg(test)]
 mod tests {
-    use crate::compact::search::*;
-    use crate::compact::tracetree::*;
-    use bitcoin::hashes::{sha256, Hash};
+    use crate::compact::search::{
+        boundary, levels, run, select, Interval, Outcome, Party, SearchError, State,
+    };
 
-    /// A toy execution: state `i + 1` is the hash of state `i` and the
-    /// step number, so a trace is deterministic from its seed and any
-    /// divergence propagates to the end.
-    fn trace(seed: u8, steps: usize, divergence: Option<usize>) -> Vec<Node> {
-        let mut out = Vec::with_capacity(steps);
-        let mut st = [seed; NODE_BYTES];
-        out.push(st);
-        for j in 1..steps {
-            let mut pre = st.to_vec();
-            pre.extend_from_slice(&(j as u64).to_be_bytes());
-            if divergence == Some(j) {
-                pre.push(0xFF); // the one step that is computed wrong
+    fn st(n: u8) -> State {
+        [n; 20]
+    }
+
+    /// A trace of `steps + 1` states that diverges from `honest` at
+    /// `from`: every state at or after `from` differs.
+    fn trace(steps: usize, from: usize, tag: u8) -> Vec<State> {
+        (0..=steps)
+            .map(|j| if j >= from { st(tag) } else { st(j as u8) })
+            .collect()
+    }
+
+    fn honest(steps: usize) -> Vec<State> {
+        (0..=steps).map(|j| st(j as u8)).collect()
+    }
+
+    // --- the interval itself ------------------------------------------
+
+    #[test]
+    fn a_dissection_has_b_minus_one_interior_points() {
+        let iv = Interval { lo: 0, hi: 16 };
+        assert_eq!(iv.points(4), vec![4, 8, 12]);
+        assert_eq!(iv.points(4).len(), 3, "b - 1 points, not b");
+    }
+
+    #[test]
+    fn the_endpoints_are_never_published() {
+        let iv = Interval { lo: 8, hi: 24 };
+        let p = iv.points(4);
+        assert!(!p.contains(&iv.lo), "lo is inherited, not published");
+        assert!(!p.contains(&iv.hi), "hi is inherited, not published");
+    }
+
+    #[test]
+    fn subintervals_tile_the_interval() {
+        let iv = Interval { lo: 0, hi: 64 };
+        let b = 8;
+        let mut cur = iv.lo;
+        for k in 0..b {
+            let s = iv.subinterval(b, k);
+            assert_eq!(s.lo, cur, "subinterval {} starts where the last ended", k);
+            cur = s.hi;
+        }
+        assert_eq!(cur, iv.hi, "and the last ends at hi");
+    }
+
+    // --- the selection rule, which is the point ------------------------
+
+    #[test]
+    fn select_finds_the_first_difference() {
+        let published = vec![st(1), st(2), st(9), st(4)];
+        let own = vec![st(1), st(2), st(3), st(4)];
+        assert_eq!(select(&published, &own), 2);
+    }
+
+    #[test]
+    fn equal_vectors_select_the_last_subinterval_and_do_not_stall() {
+        // The trace-tree version returned NothingToSelect here and needed
+        // a dispute option to punish the publisher.  An interval inherits
+        // a disagreeing upper endpoint, so the answer is the last one.
+        let v = vec![st(1), st(2), st(3)];
+        assert_eq!(select(&v, &v), 3, "b - 1 = 3, so subinterval 3 of 0..4");
+    }
+
+    #[test]
+    fn select_is_total_over_every_vector_pair() {
+        // There is no input on which the rule has no answer.
+        for first_diff in 0..=3usize {
+            let own = vec![st(1), st(2), st(3)];
+            let mut published = own.clone();
+            if first_diff < 3 {
+                published[first_diff] = st(99);
             }
-            let h = sha256::Hash::hash(&pre).to_byte_array();
-            st = h[..NODE_BYTES].try_into().unwrap();
-            out.push(st);
+            let k = select(&published, &own);
+            assert!(k <= 3, "always names a subinterval");
+            assert_eq!(k, first_diff);
         }
-        out
     }
 
-    fn tree(b: usize, levels: u32, leaves: Vec<Node>) -> TraceTree {
-        TraceTree::from_leaves(b, levels, leaves)
-    }
-
-    // ------------------------------------------------- the tree itself
+    // --- whole searches ------------------------------------------------
 
     #[test]
-    fn only_some_branching_factors_are_usable() {
-        for b in [12usize, 24, 48, 96, 192, 384] {
-            assert!(feasible(b), "b = {b}");
-        }
-        for b in [1usize, 2, 3, 6, 9, 10, 20, 36, 100, 193] {
-            assert!(!feasible(b), "b = {b} should be rejected");
-        }
+    fn a_search_isolates_the_first_divergent_step() {
+        let steps = 64;
+        let p = honest(steps);
+        let c = trace(steps, 37, 200);
+        let (stages, out) = run(&p, &c, 8).expect("a dispute");
+        assert_eq!(out.step, 36, "the step whose post-state first differs");
+        assert_eq!(stages.len(), levels(steps, 8) as usize);
     }
 
     #[test]
-    fn a_node_value_lies_inside_the_commitment_window() {
-        let children: Vec<Node> = (0..12u8).map(|i| [i; NODE_BYTES]).collect();
-        let sf = publication(&children);
-        let v = node_value(&sf);
-        // the window a 222-byte signature commits to is digest[2..32]
-        assert_eq!(v[..], sf.digest[2..22]);
-        let window = &sf.digest[2..32];
-        assert_eq!(&v[..], &window[..NODE_BYTES]);
+    fn divergence_in_the_last_subinterval_is_found() {
+        // The case the equal-vector rule exists for: every interior
+        // checkpoint agrees at the top level and only the end differs.
+        let steps = 64;
+        let p = honest(steps);
+        let c = trace(steps, 64, 200);
+        let (_, out) = run(&p, &c, 8).expect("a dispute");
+        assert_eq!(out.step, 63, "the very last step");
     }
 
     #[test]
-    fn children_round_trip_through_a_publication() {
-        for b in [12usize, 24, 48] {
-            let children: Vec<Node> = (0..b).map(|i| [(i * 5 + 1) as u8; NODE_BYTES]).collect();
-            let sf = publication(&children);
-            assert_eq!(unpack(&sf.elements, b), children);
-            assert_eq!(sf.elements.len(), elements_for(b));
-        }
+    fn divergence_at_the_first_step_is_found() {
+        let steps = 64;
+        let p = honest(steps);
+        let c = trace(steps, 1, 200);
+        let (_, out) = run(&p, &c, 8).expect("a dispute");
+        assert_eq!(out.step, 0);
     }
 
     #[test]
-    fn a_child_sits_where_the_paper_says() {
-        // "Child t lives at offset t mod 3 of element floor(t/3)."
-        for t in [0usize, 1, 2, 3, 11, 47] {
-            let (elem, off) = child_position(t);
-            assert_eq!(elem, t / 3);
-            assert_eq!(off, (t % 3) * NODE_BYTES);
-        }
-        let b = 48;
-        let children: Vec<Node> = (0..b).map(|i| [(i * 3 + 7) as u8; NODE_BYTES]).collect();
-        let sf = publication(&children);
-        for t in 0..b {
-            let (elem, off) = child_position(t);
-            assert_eq!(&sf.elements[elem][off..off + NODE_BYTES], &children[t][..]);
+    fn every_divergence_point_is_located_exactly() {
+        let steps = 64;
+        let p = honest(steps);
+        for from in 1..=steps {
+            let c = trace(steps, from, 200);
+            let (_, out) = run(&p, &c, 8).expect("a dispute");
+            assert_eq!(out.step, from - 1, "diverging at {} isolates step {}", from, from - 1);
         }
     }
 
     #[test]
-    fn levels_for_matches_the_paper() {
-        // 2^29 steps at b = 192 is four levels
-        assert_eq!(levels_for(1u128 << 29, 192), 4);
-        assert_eq!(levels_for(1u128 << 29, 96), 5);
-        assert_eq!(levels_for(1u128 << 29, 12), 9);
-        assert_eq!(levels_for(1u128 << 29, 1536), 3);
-    }
-
-    // ------------------------------------------------------- the search
-
-    #[test]
-    fn the_search_names_the_first_divergent_step() {
-        let (b, l) = (12usize, 2u32); // 144 steps
-        let steps = b.pow(l);
-        for f in 1..steps {
-            let honest = trace(1, steps, None);
-            let wrong = trace(1, steps, Some(f));
-            assert_eq!(honest[..f], wrong[..f], "they must agree before f = {f}");
-            assert_ne!(honest[f], wrong[f]);
-
-            let p = tree(b, l, honest);
-            let c = tree(b, l, wrong);
-            let (stages, out) = run(&p, &c).expect("a dispute");
-            assert_eq!(out.step, f, "the search must name f = {f}");
-            assert_eq!(stages.len(), l as usize + 1, "L + 1 transactions");
-        }
+    fn the_boundary_pre_state_is_the_agreed_endpoint() {
+        let steps = 64;
+        let p = honest(steps);
+        let c = trace(steps, 37, 200);
+        let (_, out) = run(&p, &c, 8).expect("a dispute");
+        let bd = boundary(&p, &c, &out);
+        assert_eq!(bd.pre_state, p[bd.step], "and needs no sibling subtree");
+        assert_eq!(bd.pre_state, c[bd.step], "the parties agree on it");
+        assert_ne!(bd.prover_post, bd.challenger_post, "and differ after it");
     }
 
     #[test]
-    fn it_works_at_three_levels_too() {
-        let (b, l) = (12usize, 3u32); // 1,728 steps
-        let steps = b.pow(l);
-        for f in [1usize, 2, 11, 12, 13, 143, 144, 500, 1000, 1726, 1727] {
-            let p = tree(b, l, trace(2, steps, None));
-            let c = tree(b, l, trace(2, steps, Some(f)));
-            let (stages, out) = run(&p, &c).expect("a dispute");
-            assert_eq!(out.step, f);
-            assert_eq!(stages.len(), 4);
-        }
-    }
-
-    #[test]
-    fn the_digits_spell_the_step_in_base_b() {
-        let (b, l) = (12usize, 3u32);
-        let steps = b.pow(l);
-        let f = 977usize;
-        let p = tree(b, l, trace(3, steps, None));
-        let c = tree(b, l, trace(3, steps, Some(f)));
-        let (_, out) = run(&p, &c).unwrap();
-        assert_eq!(out.digits.len(), l as usize);
-        let mut v = 0usize;
-        for k in &out.digits {
-            assert!(*k < b, "a digit is in range");
-            v = v * b + k;
-        }
-        assert_eq!(v, out.step);
-        assert_eq!(v, f);
-    }
-
-    #[test]
-    fn the_boundary_is_an_agreed_state_followed_by_a_disagreed_one() {
-        let (b, l) = (12usize, 2u32);
-        let steps = b.pow(l);
-        for f in [1usize, 7, 12, 60, 143] {
-            let p = tree(b, l, trace(4, steps, None));
-            let c = tree(b, l, trace(4, steps, Some(f)));
-            let (_, out) = run(&p, &c).unwrap();
-            let bd = boundary(&p, &c, &out);
-            assert_eq!(bd.step, f);
-            assert_eq!(p.leaves()[f - 1], c.leaves()[f - 1], "pre-state agreed");
-            assert_ne!(bd.prover_post, bd.challenger_post, "post-state disputed");
-        }
-    }
-
-    // -------------------------------------------- the shape of a stage
-
-    #[test]
-    fn stage_one_selects_nothing_and_the_last_publishes_nothing() {
-        let (b, l) = (12usize, 3u32);
-        let steps = b.pow(l);
-        let p = tree(b, l, trace(5, steps, None));
-        let c = tree(b, l, trace(5, steps, Some(42)));
-        let (stages, _) = run(&p, &c).unwrap();
-
-        assert!(
-            stages[0].selection.is_none(),
-            "stage 1 carries no selection"
-        );
-        assert!(stages[0].publication.is_some());
-        let last = stages.last().unwrap();
-        assert!(last.selection.is_some());
-        assert!(
-            last.publication.is_none(),
-            "stage L+1 names a leaf, so it publishes nothing"
-        );
-        for s in &stages[1..stages.len() - 1] {
-            assert!(s.selection.is_some() && s.publication.is_some());
-        }
-    }
-
-    #[test]
-    fn the_parties_alternate_starting_with_the_prover() {
-        let (b, l) = (12usize, 3u32);
-        let steps = b.pow(l);
-        let p = tree(b, l, trace(6, steps, None));
-        let c = tree(b, l, trace(6, steps, Some(99)));
-        let (stages, _) = run(&p, &c).unwrap();
-        for (n, s) in stages.iter().enumerate() {
-            assert_eq!(s.index, n + 1);
-            assert_eq!(s.sender, Party::of_stage(n + 1));
-        }
+    fn stages_alternate_from_the_prover() {
+        let steps = 64;
+        let (stages, _) = run(&honest(steps), &trace(steps, 37, 200), 8).unwrap();
         assert_eq!(stages[0].sender, Party::Prover);
-        assert_eq!(stages[1].sender, Party::Challenger);
-        // L even and the prover first means the trailing selection is
-        // hers: the party on trial makes the last move.
-        assert_eq!(stages.last().unwrap().sender, Party::Challenger);
-    }
-
-    #[test]
-    fn a_publication_is_the_children_of_the_node_the_digits_name() {
-        let (b, l) = (12usize, 3u32);
-        let steps = b.pow(l);
-        let p = tree(b, l, trace(7, steps, None));
-        let c = tree(b, l, trace(7, steps, Some(617)));
-        let (stages, out) = run(&p, &c).unwrap();
-
-        let mut j = 0usize;
-        for (n, s) in stages.iter().enumerate() {
-            if let Some(k) = s.selection {
-                j = j * b + k;
-                let d = n as u32; // after n selections we are at level n
-                assert_eq!(s.node.map(|x| x.1), if d < l { Some(j) } else { None });
-                if let Some((nd, nj)) = s.node {
-                    assert_eq!((nd, nj), (d, j));
-                    let owner = match s.sender {
-                        Party::Prover => &p,
-                        Party::Challenger => &c,
-                    };
-                    let sf = s.publication.as_ref().unwrap();
-                    assert_eq!(unpack(&sf.elements, b), owner.children(nd, nj));
-                }
-            }
+        for w in stages.windows(2) {
+            assert_ne!(w[0].sender, w[1].sender, "stages alternate");
         }
-        assert_eq!(j, out.step);
-    }
-
-    // ------------------------------------------------------ edge cases
-
-    #[test]
-    fn identical_traces_are_not_a_dispute() {
-        let (b, l) = (12usize, 2u32);
-        let steps = b.pow(l);
-        let p = tree(b, l, trace(8, steps, None));
-        let c = tree(b, l, trace(8, steps, None));
-        assert_eq!(p.root(), c.root());
-        assert!(matches!(run(&p, &c), Err(SearchError::RootsAgree)));
     }
 
     #[test]
-    fn the_selection_rule_is_total_when_the_vectors_differ() {
-        let a: Vec<Node> = (0..12u8).map(|i| [i; NODE_BYTES]).collect();
-        let mut b2 = a.clone();
-        assert_eq!(
-            select(&a, &b2),
-            None,
-            "equal vectors have nothing to select"
-        );
-        b2[7][3] ^= 1;
-        assert_eq!(select(&a, &b2), Some(7));
-        b2[2][0] ^= 1;
-        assert_eq!(select(&a, &b2), Some(2), "the *least* differing index");
+    fn agreeing_results_are_not_a_dispute() {
+        let p = honest(64);
+        // Stage holds a StructuredFile, which is not PartialEq, so match
+        // on the error rather than comparing the whole Result.
+        match run(&p, &p, 8) {
+            Err(SearchError::ResultsAgree) => {}
+            other => panic!("expected ResultsAgree, got {:?}", other.map(|(s, o)| (s.len(), o))),
+        }
     }
 
-    /// Divergence at the very last step is the awkward case: the padding
-    /// repeats the halting state, so the last leaves must still differ.
     #[test]
-    fn divergence_at_the_last_step_is_found() {
-        let (b, l) = (12usize, 2u32);
-        let steps = b.pow(l);
-        let f = steps - 1;
-        let p = tree(b, l, trace(9, steps, None));
-        let c = tree(b, l, trace(9, steps, Some(f)));
-        let (_, out) = run(&p, &c).unwrap();
-        assert_eq!(out.step, f);
+    fn four_levels_cover_a_192_ary_search_of_2_to_the_30() {
+        assert_eq!(levels(192usize.pow(4), 192), 4);
+        assert!(192usize.pow(4) >= 1 << 30);
+    }
+
+    #[test]
+    fn an_outcome_names_one_digit_per_level_plus_the_trailing_one() {
+        let steps = 64;
+        let (_, out): (_, Outcome) =
+            run(&honest(steps), &trace(steps, 37, 200), 8).unwrap();
+        assert_eq!(out.digits.len(), levels(steps, 8) as usize);
     }
 }
