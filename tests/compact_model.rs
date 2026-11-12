@@ -118,3 +118,106 @@ fn a_node_is_twenty_bytes() {
     assert_eq!(memory::NODE, 20);
     assert_eq!(memory::SLOT, 32);
 }
+
+// --- C05: the verification trace -------------------------------------------
+// python: memory.derived_set / trace_bytes / word_worst_case_trace_bytes
+
+/// The worst reachable word-granular pattern, as `memory.py` finds it.
+fn word_worst() -> Vec<usize> {
+    // python: memory.word_worst_case(18) searches pc against three data
+    // placements and two shapes; the maximum is the one below.
+    let m = memory::MerkleMemory::new(memory::WORD_LEVELS, &Default::default());
+    let n = 1usize << memory::WORD_LEVELS;
+    let r = memory::REG_WORDS;
+    let mut best = (0usize, Vec::new());
+    let step = (n / 4096).max(1);
+    for pc in (0..n).step_by(step) {
+        for data in [pc ^ (n - 1), (pc + n / 2) % n, n - 1 - pc] {
+            for shape in [
+                vec![0usize, r / 2, r - 1, pc],
+                vec![0usize, r - 1, pc, data],
+            ] {
+                let mut v = shape.clone();
+                v.sort_unstable();
+                v.dedup();
+                let b = m.multiproof_bytes(&v);
+                if b > best.0 {
+                    best = (b, v);
+                }
+            }
+        }
+    }
+    best.1
+}
+
+#[test]
+fn the_worst_word_multiproof_is_1040_bytes() {
+    let m = memory::MerkleMemory::new(memory::WORD_LEVELS, &Default::default());
+    assert_eq!(m.multiproof_bytes(&word_worst()), 1_040);
+}
+
+/// The distinction finding C05 turns on: the proof is the verifier's
+/// input and the derived set is its working, and only the first was ever
+/// published.
+#[test]
+fn the_working_is_larger_than_the_proof_it_drives() {
+    let m = memory::MerkleMemory::new(memory::WORD_LEVELS, &Default::default());
+    let w = word_worst();
+    let proof = m.multiproof_bytes(&w);
+    let trace = m.trace_bytes(&w);
+    assert_eq!(proof, 1_040);
+    assert_eq!(trace - proof, 1_100, "the working");
+    assert_eq!(trace, 2_140);
+    assert!(
+        trace - proof > proof,
+        "four leaves have four distinct ancestors at almost every level, \
+         while a sibling is needed only where an ancestor's partner is not \
+         itself an ancestor"
+    );
+}
+
+#[test]
+fn the_two_sets_are_disjoint_and_cover_every_step() {
+    let m = memory::MerkleMemory::new(memory::WORD_LEVELS, &Default::default());
+    let w = word_worst();
+    let need = m.authenticated_set(&w);
+    let derived = m.derived_set(&w);
+
+    // A node is either supplied or computed, never both: `derived` is the
+    // ancestors and `need` is their partners that are not ancestors.
+    assert!(
+        need.intersection(&derived).next().is_none(),
+        "a node cannot be both supplied and computed"
+    );
+
+    // Every computed node has both its children available, which is what
+    // makes each step refutable against bound values.
+    let available: std::collections::BTreeSet<(u32, usize)> = need
+        .iter()
+        .chain(derived.iter())
+        .copied()
+        .chain(w.iter().map(|i| (memory::WORD_LEVELS, *i)))
+        .collect();
+    for (d, j) in &derived {
+        for child in [(d + 1, 2 * j), (d + 1, 2 * j + 1)] {
+            assert!(
+                available.contains(&child),
+                "step at ({d},{j}) is missing child {child:?}, so it could \
+                 not be refuted against anything"
+            );
+        }
+    }
+
+    // And the root is computed, so the top step closes against the step
+    // message's committed pre-state root.
+    assert!(derived.contains(&(0, 0)), "the root is part of the working");
+}
+
+#[test]
+fn the_slot_tree_has_the_same_gap_and_a_smaller_one() {
+    // python: memory.worst_case_trace_bytes(15)
+    let m = memory::MerkleMemory::new(15, &Default::default());
+    let w = vec![0usize, 3, 8_192, 24_575];
+    assert_eq!(m.multiproof_bytes(&w), 800);
+    assert_eq!(m.trace_bytes(&w), 1_660);
+}

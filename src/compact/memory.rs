@@ -161,6 +161,41 @@ impl MerkleMemory {
         self.authenticated_set(leaves).len() * NODE
     }
 
+    /// The nodes a verifier *computes* while checking the multiproof:
+    /// every strict ancestor of a revealed leaf, the root included.
+    ///
+    /// `authenticated_set` is the verifier's input and this is its
+    /// working, and the distinction is the whole of audit finding C05.
+    /// Publishing the input makes the result publicly computable; it does
+    /// not make one step of the working refutable, because when a
+    /// challenger names level `l` the step is `n_{l+1} = C(n_l, s_l)` and
+    /// only `s_l` is bound to anything.  A circuit asked to check that
+    /// compression can be handed whatever `n_l` the prover likes.
+    ///
+    /// So both are published.  Then every step relates three bound
+    /// values: two children in the file and their parent in the file or,
+    /// at the top, in the step message.
+    pub fn derived_set(&self, leaves: &[usize]) -> BTreeSet<(u32, usize)> {
+        let mut known: BTreeSet<(u32, usize)> = leaves.iter().map(|i| (self.levels, *i)).collect();
+        let mut derived: BTreeSet<(u32, usize)> = BTreeSet::new();
+        let mut frontier = known.clone();
+        for d in (1..=self.levels).rev() {
+            let mut next = BTreeSet::new();
+            for (_, j) in frontier.iter().filter(|(dd, _)| *dd == d) {
+                next.insert((d - 1, j / 2));
+            }
+            known.extend(next.iter().copied());
+            derived.extend(next.iter().copied());
+            frontier = next;
+        }
+        derived
+    }
+
+    /// What §9.4 publishes: the multiproof and the working it drives.
+    pub fn trace_bytes(&self, leaves: &[usize]) -> usize {
+        (self.authenticated_set(leaves).len() + self.derived_set(leaves).len()) * NODE
+    }
+
     /// What independent paths would cost: one full path per touched slot.
     pub fn independent_path_bytes(&self, leaves: &[usize]) -> usize {
         leaves.len() * self.levels as usize * NODE
