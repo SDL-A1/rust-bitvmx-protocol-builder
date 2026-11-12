@@ -1,4 +1,4 @@
-//! The verdict bit, gating a secret.
+//! The verdict wire, gating a secret.
 //!
 //! Section 8 of the paper does not want a bit printed on a screen.  It
 //! wants: if the claim is wrong, the challenger ends up holding `P_b`
@@ -9,19 +9,34 @@
 //! at setup and in the stake's script, the prover publishes
 //!
 //! ```text
-//! ct = SHA256(tweak || W_v^1) xor P_b
+//! ct = SHA256(tweak || W_v^p) xor P_b
 //! ```
 //!
-//! where `W_v^1` is the verdict wire's label for *one*.  A challenger
-//! that evaluates to a wrong claim holds `W_v^1`, recovers `P_b`, and
-//! knows it did because the hash matches.  A challenger that evaluates
-//! to a correct claim holds `W_v^0` and computes an unrelated pad.
+//! where `W_v^p` is the verdict wire's label for whichever bit `p` is
+//! supposed to pay.  A challenger holding that label recovers `P_b`, and
+//! knows it did because the hash matches; a challenger holding the other
+//! label computes an unrelated pad.
 //!
-//! Two consequences, both recorded in `docs/compact-deferred.md`.  The
-//! garbler is the prover, so the garbling has to be proved correct.  And
-//! `ct` has to be inside that proof, because the challenger cannot check
-//! `ct` before it evaluates -- publishing `h_b` at setup is what makes
-//! the statement expressible.
+//! # On polarity, and what C04 actually objects to
+//!
+//! `p` is a free parameter of [`Release::seal`], not a property of this
+//! construction: sealing against the zero-label pays on a false verdict
+//! just as cheaply as sealing against the one-label pays on a true one.
+//! Audit finding C04 is therefore *not* about this primitive.  It is about
+//! the case where the thing the circuit must check is a signature, which
+//! is too expensive to verify in-circuit and so gets checked by an
+//! equality-gated release instead -- and an equality-gated release emits
+//! no verdict wire whose label one could choose.  There is nothing to flip.
+//!
+//! That case is now handled by [`super::gsig`], which does not gate
+//! anything: the evaluation *is* the signature, and the predicate that
+//! chooses what gets signed negates for the price of one free gate.
+//!
+//! Two consequences of this module remain, both recorded in
+//! `docs/compact-deferred.md`.  The garbler is the prover, so the garbling
+//! has to be proved correct.  And `ct` has to be inside that proof,
+//! because the challenger cannot check `ct` before it evaluates --
+//! publishing `h_b` at setup is what makes the statement expressible.
 
 use bitcoin::hashes::{sha256, Hash};
 
@@ -58,8 +73,11 @@ pub struct Release {
 }
 
 impl Release {
-    pub fn seal(tweak: &[u8], verdict_one: &Label, secret: &Secret) -> Self {
-        let p = pad(tweak, verdict_one);
+    /// `paying` is the verdict wire's label for the bit that should
+    /// release the secret.  Either label is equally good; see the
+    /// module note on C04.
+    pub fn seal(tweak: &[u8], paying: &Label, secret: &Secret) -> Self {
+        let p = pad(tweak, paying);
         let mut ct = [0u8; 32];
         for i in 0..32 {
             ct[i] = p[i] ^ secret[i];

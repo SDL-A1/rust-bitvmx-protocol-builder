@@ -3,6 +3,7 @@ pub mod builder_connection_test;
 pub mod builder_outputs_test;
 pub mod builder_persistance_test;
 pub mod compact_fraud_test;
+pub mod compact_gsig_test;
 pub mod compact_dispute_test;
 pub mod compact_endgame_test;
 pub mod compact_search_test;

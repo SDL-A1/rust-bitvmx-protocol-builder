@@ -20,6 +20,7 @@ pub mod endgame;
 pub mod flatmerkle;
 pub mod fraud;
 pub mod garble;
+pub mod gsig;
 pub mod memory;
 pub mod output;
 pub mod release;
