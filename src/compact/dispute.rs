@@ -18,9 +18,9 @@ use super::commitment::{
     WINDOW_LEN,
 };
 use super::flatmerkle::{verify_proof, Frame, Proof};
-use super::messages::MCode;
 use super::sha256_core::{compress, midstate_at, BLOCK_SIZE, STATE_SIZE};
-use super::tracetree::{child_position, Node, NODE_BYTES, NODE_OFFSET};
+use super::checkpoints::{packed_position, NODE_BYTES, NODE_OFFSET};
+use super::search::State as Node;
 use bitcoin::secp256k1::{schnorr, Message, Secp256k1, Verification, XOnlyPublicKey};
 
 // ---------------------------------------------------------------------
@@ -70,6 +70,16 @@ pub enum Profile {
     /// publisher signed `SINGLE|ANYONECANPAY` and committed to a constant
     /// everyone could have written down in advance.
     CommittedToPinnedOutput,
+    /// `8B = 1776` but the window is the *empty annex's* hash: she carried
+    /// the bare 0x50 opt-in tag and published no file.
+    ///
+    /// This case was missing until the November 2026 audit (C09) found
+    /// it.  BIP341 appends `sha_annex`, which is thirty-two bytes whatever
+    /// the annex weighs, so an empty annex reaches 1776 bits exactly as a
+    /// real publication does and the length field cannot separate them.
+    /// Its window is a constant anyone can write down:
+    /// `SHA256(0x01 || 0x50)[2..32]`.
+    CarriedEmptyAnnex,
     /// Not the protocol's profile at all.
     WrongLength { bitcount: u64 },
     /// The witness is not the publisher's.
@@ -236,6 +246,9 @@ pub fn read_profile<C: Verification>(
     if &w.window() == pinned_window {
         return Profile::CommittedToPinnedOutput;
     }
+    if w.window() == empty_annex_window() {
+        return Profile::CarriedEmptyAnnex;
+    }
     Profile::Published { window: w.window() }
 }
 
@@ -265,6 +278,16 @@ pub fn m6_stands<C: Verification>(
 }
 
 /// The node value a published window carries.
+/// The window a publisher lands on if she carries the bare 0x50 annex and
+/// no file.  `sha_annex` of an empty annex is a constant, so this is one.
+pub fn empty_annex_window() -> [u8; WINDOW_LEN] {
+    use bitcoin::hashes::{sha256, Hash};
+    let d = sha256::Hash::hash(&[0x01u8, 0x50]).to_byte_array();
+    let mut w = [0u8; WINDOW_LEN];
+    w.copy_from_slice(&d[2..2 + WINDOW_LEN]);
+    w
+}
+
 pub fn node_value_of(window: &[u8; WINDOW_LEN]) -> Node {
     window[..NODE_BYTES].try_into().expect("20 bytes")
 }
@@ -292,7 +315,7 @@ pub fn entry_holds(
     frame: &Frame,
     c: &EntryClaim,
 ) -> bool {
-    let (elem, off) = child_position(c.index);
+    let (elem, off) = packed_position(c.index);
     if c.element.len() < off + NODE_BYTES {
         return false;
     }
@@ -354,14 +377,47 @@ pub fn value_of_digest(digest: &[u8; STATE_SIZE]) -> Node {
 // Which refutations ride in the dispute, and which are inherited
 // ---------------------------------------------------------------------
 
+/// The publication disputes of the interval construction.
+///
+/// Two of the trace-tree set are gone, and neither is a cheaper version of
+/// itself -- they are obligations an interval search does not incur.
+///
+///   * `WrongNode` refuted a publication that was not the opening of a
+///     node its predecessor listed.  An interval has no parent node.
+///   * The equal-vector half of `SelfContradiction` rescued a protocol
+///     that had stalled because the two vectors matched.  `search::select`
+///     is total, so there is no stall to rescue.
+///
+/// What remains of `SelfContradiction` is its honest half: a sender whose
+/// publication hashes to the very value it selected as disagreed has
+/// contradicted its own signed selection, and that is still refutable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MCode {
+    /// Not a canonical FlatMerkle file.
+    Malformed = 0,
+    /// The claimed interior state is not the one the file holds.
+    FalseOpening = 1,
+    /// The publication contradicts the sender's own selection.
+    SelfContradiction = 2,
+    /// The slot was not spent with the protocol's signature-hash profile.
+    BadProfile = 3,
+    /// The reference points at a stage that published nothing.
+    DanglingReference = 4,
+}
+
 /// Where each option's evidence comes from.  Every one of them is the
 /// disputer's: none demands an answer.
 pub fn evidence_for(code: MCode) -> &'static str {
     match code {
         MCode::Malformed => "a FlatMerkle malformation proof, O(log N)",
-        MCode::WrongNode => "an opening of the sender's previous publication",
+        MCode::FalseOpening => "an opening of the published file at that index",
         MCode::SelfContradiction => "an opening, and a comparison of two 20-byte values",
         MCode::BadProfile => "the publisher's own signature",
         MCode::DanglingReference => "the referenced publisher's signature",
     }
 }
+
+/// Five codes fit the three-bit option field the challenge message carries,
+/// as the trace tree's six did.
+pub const MCODE_BITS: u32 = 3;

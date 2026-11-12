@@ -13,7 +13,9 @@
 
 pub mod annex;
 pub mod bristol;
+pub mod checkpoints;
 pub mod commitment;
+pub mod dispute;
 pub mod endgame;
 pub mod flatmerkle;
 pub mod fraud;
@@ -30,5 +32,4 @@ pub mod sha256_core;
 // kept as the reference for the interval rewrite -- the sighash profiles,
 // the witness shapes and the M4 predicate in dispute.rs are all still
 // wanted, and retyping them from memory is how detail gets lost.
-//
-//   pub mod dispute;
+
