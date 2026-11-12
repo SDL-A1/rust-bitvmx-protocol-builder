@@ -29,6 +29,16 @@ pub const WINDOW_START: usize = 192;
 /// How long it is.
 pub const WINDOW_LEN: usize = 30;
 
+/// Where the window begins inside the *digest* it commits to.
+///
+/// The 222-byte profile's final block is `D[2..31] || 80 || 00^25 ||
+/// 1776`, so of a 32-byte digest `D` the signature sees bytes 2 through
+/// 31 and no others.  This is the only correct use of the number two in
+/// this construction: it is about a digest, never about where a value
+/// sits inside a FlatMerkle element.  `checkpoints::packed_position`
+/// once confused the two.
+pub const DIGEST_WINDOW_OFFSET: usize = 2;
+
 // -- the annex-free alternative ----------------------------------------
 //
 // The same arithmetic, for a publication that rides in an `OP_RETURN`

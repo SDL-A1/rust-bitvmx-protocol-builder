@@ -20,14 +20,13 @@ pub const NODE_BYTES: usize = 20;
 /// Three of them to a sixty-four-byte element, leaving four spare.
 pub const PER_ELEMENT: usize = 3;
 
-/// Where a state value begins inside a publication's *digest*.
-///
-/// This is about the digest, not about an element.  A `222`-byte
-/// signature commits to thirty bytes of the message, starting at offset
-/// two, so the twenty bytes a stage is bound to are taken from there.
-/// Packing inside an element is a separate question and the answer is
-/// zero -- see [`packed_position`], which must agree with [`pack`].
-pub const NODE_OFFSET: usize = 2;
+// `NODE_OFFSET` lived here and is gone.  It named where a state value
+// begins inside a publication's digest, which was a real quantity while a
+// parent listed its children by that window.  Nothing lists a publication
+// here, so it had no reader left, and it had already been misread once --
+// `packed_position` added it to an element offset, where it has no
+// business.  The digest window it was really about is
+// `commitment::DIGEST_WINDOW_OFFSET`, next to the profile that defines it.
 
 /// A `b`-way dissection is fixed by its `b - 1` interior states.
 pub fn interior_states(b: usize) -> usize {

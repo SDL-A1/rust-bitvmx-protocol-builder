@@ -15,11 +15,11 @@
 use super::commitment::{
     CONSTANT_TAIL, CONSTANT_TAIL_OFFSET, INPUT_INDEX_OFFSET, OUTPUT_DIGEST_OFFSET,
     OUTPUT_FINAL_BLOCK_START, OUTPUT_PROFILE_BITCOUNT, PROFILE_BITCOUNT, SPEND_TYPE_OFFSET,
-    WINDOW_LEN,
+    DIGEST_WINDOW_OFFSET, WINDOW_LEN,
 };
 use super::flatmerkle::{verify_proof, Frame, Proof};
 use super::sha256_core::{compress, midstate_at, BLOCK_SIZE, STATE_SIZE};
-use super::checkpoints::{packed_position, NODE_BYTES, NODE_OFFSET};
+use super::checkpoints::{packed_position, NODE_BYTES};
 use super::search::State as Node;
 use bitcoin::secp256k1::{schnorr, Message, Secp256k1, Verification, XOnlyPublicKey};
 
@@ -198,7 +198,8 @@ pub fn read_output_profile<C: Verification>(
         return OutputProfile::WrongInputIndex { index: idx };
     }
     OutputProfile::Published {
-        window: w.final_block[OUTPUT_DIGEST_OFFSET + 2..OUTPUT_DIGEST_OFFSET + 2 + WINDOW_LEN]
+        window: w.final_block[OUTPUT_DIGEST_OFFSET + DIGEST_WINDOW_OFFSET
+            ..OUTPUT_DIGEST_OFFSET + DIGEST_WINDOW_OFFSET + WINDOW_LEN]
             .try_into()
             .expect("30 bytes"),
     }
@@ -326,52 +327,36 @@ pub fn entry_holds(
 }
 
 // ---------------------------------------------------------------------
-// M4: the publication contradicts the sender's own selection
+// The tree's M3, and why it cannot be restated here
 // ---------------------------------------------------------------------
-
-/// By selecting index `k` at stage `i`, the sender asserts it disagrees
-/// with the value the stage-`(i-1)` publication lists there.  Its own
-/// publication at stage `i` must therefore *not* hash to that value.
-///
-/// A sender that republishes the counterparty's vector verbatim would
-/// leave the counterparty with two identical vectors and no index to
-/// select, and could then run out the clock.  This is the refutation that
-/// makes the selection rule total in practice as well as in principle.
-#[derive(Clone, Debug)]
-pub struct SelfContradiction {
-    /// The index the sender signed at this stage.
-    pub selected: usize,
-    /// The counterparty's previous publication, opened at that index.
-    pub previous: EntryClaim,
-    /// The node value of the sender's own publication at this stage.
-    pub own_value: Node,
-}
-
-/// Does M4 stand?  Open the previous publication at the selected index,
-/// authenticate this publication's digest, and compare the two 20-byte
-/// values: if they are equal the sender has contradicted its own signed
-/// selection.
-pub fn m4_stands(
-    prev_elements: usize,
-    prev_digest: &[u8; STATE_SIZE],
-    prev_frame: &Frame,
-    s: &SelfContradiction,
-) -> bool {
-    if s.previous.index != s.selected {
-        return false;
-    }
-    if !entry_holds(prev_elements, prev_digest, prev_frame, &s.previous) {
-        return false;
-    }
-    s.previous.claimed == s.own_value
-}
-
-/// The node value a publication's digest carries, for comparison.
-pub fn value_of_digest(digest: &[u8; STATE_SIZE]) -> Node {
-    digest[NODE_OFFSET..NODE_OFFSET + NODE_BYTES]
-        .try_into()
-        .expect("20 bytes")
-}
+//
+// The trace tree had an option for a sender whose publication hashed to
+// the very value it had selected as disagreed.  It was a real
+// contradiction *there* because the tree identified the two objects: a
+// child's value WAS the twenty-byte window of the digest of the child's
+// own publication, so "my publication hashes to the value I said I
+// disagree with" compares a thing to itself.
+//
+// An interval has no such identity, and the check does not survive the
+// change of design.  What the previous publication lists at index `k` is
+// a machine-state hash.  What the sender publishes at this stage is a
+// dissection of the subinterval `k` names, and its digest is the hash of
+// a FlatMerkle file of interior states -- not a state hash at all.  The
+// two are different kinds of twenty-byte value.  Comparing them type
+// checks and means nothing: it can fire only on a 160-bit collision, and
+// an honest sender is as likely to trip it as a dishonest one.
+//
+// Nor is there a weaker version to keep.  The sender's own value at the
+// disagreed point is the *upper endpoint* of its new interval, and
+// endpoints are inherited rather than published (`search::Interval`), so
+// the chain never sees it at this stage.  It surfaces in the endgame's
+// step message, where the lie is adjudicated on its merits.  Which is the
+// argument the search already makes: by the full-duplex soundness
+// theorem a party that selects inconsistently with its own trace has
+// conceded, not attacked, so no option is owed.
+//
+// This replaces `SelfContradiction`, `m4_stands` and `value_of_digest`,
+// all three of which were carried across from the tree unexamined.
 
 // ---------------------------------------------------------------------
 // Which refutations ride in the dispute, and which are inherited
@@ -396,14 +381,14 @@ pub fn value_of_digest(digest: &[u8; STATE_SIZE]) -> Node {
 pub enum MCode {
     /// Not a canonical FlatMerkle file.
     Malformed = 0,
-    /// The claimed interior state is not the one the file holds.
-    FalseOpening = 1,
-    /// The publication contradicts the sender's own selection.
-    SelfContradiction = 2,
     /// The slot was not spent with the protocol's signature-hash profile.
-    BadProfile = 3,
+    BadProfile = 1,
     /// The reference points at a stage that published nothing.
-    DanglingReference = 4,
+    ///
+    /// Conditional on deduplication existing, which for an interval search
+    /// it does not yet: a reference must bind to an interval and a stage
+    /// rather than to a tree node, and that is not written.
+    DanglingReference = 2,
 }
 
 /// Where each option's evidence comes from.  Every one of them is the
@@ -411,13 +396,20 @@ pub enum MCode {
 pub fn evidence_for(code: MCode) -> &'static str {
     match code {
         MCode::Malformed => "a FlatMerkle malformation proof, O(log N)",
-        MCode::FalseOpening => "an opening of the published file at that index",
-        MCode::SelfContradiction => "an opening, and a comparison of two 20-byte values",
         MCode::BadProfile => "the publisher's own signature",
         MCode::DanglingReference => "the referenced publisher's signature",
     }
 }
 
-/// Five codes fit the three-bit option field the challenge message carries,
-/// as the trace tree's six did.
-pub const MCODE_BITS: u32 = 3;
+/// Three codes fit a two-bit option field.
+///
+/// The tree had five and spent three bits.  Two of those five do not
+/// survive the interval: `WrongNode`, which policed a parent-child
+/// relation an interval does not have, and `SelfContradiction`, for the
+/// reason given above.  A third, `FalseOpening`, was never an option at
+/// all -- an opening is checked against a digest the publisher's own
+/// signature committed to, so a false one is impossible rather than
+/// refutable, and `entry_holds` says so. It was introduced here to keep
+/// the count at five when `WrongNode` went, which is backwards: the count
+/// is a consequence, not a target.
+pub const MCODE_BITS: u32 = 2;

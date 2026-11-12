@@ -6,43 +6,63 @@
 //! found as C09.
 #[cfg(test)]
 mod tests {
-    use crate::compact::checkpoints::{self, NODE_BYTES, NODE_OFFSET, PER_ELEMENT};
+    use crate::compact::checkpoints::{self, NODE_BYTES, PER_ELEMENT};
+    use crate::compact::commitment::{DIGEST_WINDOW_OFFSET, WINDOW_LEN};
     use crate::compact::dispute::{empty_annex_window, evidence_for, MCode, MCODE_BITS};
 
     // --- the option set ------------------------------------------------
 
+    /// The whole option set, written out.  Adding a code without adding
+    /// it here fails to compile, which is the point.
+    const ALL: [MCode; 3] = [
+        MCode::Malformed,
+        MCode::BadProfile,
+        MCode::DanglingReference,
+    ];
+
     #[test]
     fn every_option_names_evidence_its_own_disputer_holds() {
-        for c in [
-            MCode::Malformed,
-            MCode::FalseOpening,
-            MCode::SelfContradiction,
-            MCode::BadProfile,
-            MCode::DanglingReference,
-        ] {
+        for c in ALL {
             assert!(!evidence_for(c).is_empty(), "{:?} has no evidence", c);
         }
     }
 
     #[test]
-    fn five_options_fit_the_three_bit_field() {
-        assert!(5 <= 1 << MCODE_BITS);
+    fn three_options_fit_a_two_bit_field() {
+        assert_eq!(ALL.len(), 3);
+        assert!(ALL.len() <= 1 << MCODE_BITS);
+        assert_eq!(MCODE_BITS, 2, "the tree spent three bits on five codes");
     }
 
+    /// Two of the tree's five options do not survive the interval, and a
+    /// third was never an option.
     #[test]
-    fn there_is_no_wrong_node_option() {
-        // An interval has no parent node for a publication to open from,
-        // so the option the tree needed does not exist here.  This test
-        // is a statement about the enum, and it fails to compile rather
-        // than fails to pass if someone adds it back without thinking.
-        let all = [
-            MCode::Malformed,
-            MCode::FalseOpening,
-            MCode::SelfContradiction,
-            MCode::BadProfile,
-            MCode::DanglingReference,
-        ];
-        assert_eq!(all.len(), 5, "the tree had six");
+    fn the_options_the_interval_does_not_have() {
+        // WrongNode policed a parent-child relation an interval lacks.
+        // SelfContradiction compared a machine-state hash to the digest
+        // of a file of state hashes; the tree identified those two
+        // objects and an interval does not, so the comparison means
+        // nothing here.
+        // FalseOpening was never refutable at all: an opening is checked
+        // against a digest the publisher's own signature committed to.
+        assert_eq!(ALL.len(), 3, "the tree had five");
+
+        // Each surviving option's evidence is something the disputer
+        // already holds, and none of it is a comparison of two values of
+        // different kinds -- which is what SelfContradiction had become.
+        for c in ALL {
+            let e = evidence_for(c);
+            assert!(
+                !e.contains("20-byte values"),
+                "{c:?} still names the tree's comparison: {e}"
+            );
+        }
+
+        // And the codes are dense from zero, so the two-bit field is
+        // fully used rather than merely sufficient.
+        let mut codes: Vec<u8> = ALL.iter().map(|c| *c as u8).collect();
+        codes.sort_unstable();
+        assert_eq!(codes, vec![0, 1, 2]);
     }
 
     // --- C09: the empty annex ------------------------------------------
@@ -72,8 +92,13 @@ mod tests {
     fn states_pack_three_to_an_element() {
         assert_eq!(PER_ELEMENT, 3);
         assert_eq!(NODE_BYTES, 20);
-        assert_eq!(NODE_OFFSET, 2);
-        assert!(NODE_OFFSET + PER_ELEMENT * NODE_BYTES <= 64, "and fit a block");
+        // The digest window, which is what the number two is really
+        // about: the 222-byte profile commits to D[2..31].  It is not an
+        // offset inside an element, and `packed_position` once added it
+        // to one.
+        assert_eq!(DIGEST_WINDOW_OFFSET, 2);
+        assert_eq!(DIGEST_WINDOW_OFFSET + WINDOW_LEN, 32, "to the end of the digest");
+        assert!(PER_ELEMENT * NODE_BYTES <= 64, "and three states fit a block");
     }
 
     #[test]
