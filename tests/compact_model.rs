@@ -1,14 +1,15 @@
 //! The Rust compact module, checked against the paper's Python model.
 //!
-//! `compact2/python` carries 35 checks and `compact/python` 2,304, and
+//! `compact2/python` carries 108 checks and `compact/python` 2,304, and
 //! between them they are the specification every figure in both papers is
 //! produced by.  This file pins the Rust to the same numbers, so that the
 //! two cannot drift the way the papers' own tables did.
 //!
-//! Before this file existed there were zero `#[test]`s across 3,796 lines
-//! of `src/compact/`.  That is how the M4 predicate came to implement one
-//! of its four cases, and how `memory.rs` came to model a machine that
-//! rejects unaligned access as though it straddled slots.
+//! The suite in `src/tests/` exercises the modules; what was missing was
+//! anything tying them to the model, which is a different job.  That gap
+//! is how the M4 predicate came to implement one of its four cases, and
+//! how `memory.rs` came to model a machine that rejects unaligned access
+//! as though it straddled slots.
 
 use protocol_builder::compact::{annex, commitment, flatmerkle, memory};
 
