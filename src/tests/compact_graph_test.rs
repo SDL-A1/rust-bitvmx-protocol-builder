@@ -9,6 +9,7 @@ mod tests {
     use bitcoin::hashes::Hash;
     use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
     use bitcoin::sighash::Prevouts;
+    use bitcoin::taproot::LeafVersion;
     use bitcoin::{TapSighashType, Witness};
     use std::collections::{HashMap, HashSet};
 
@@ -543,10 +544,25 @@ mod tests {
         let (key, _) = kp.x_only_public_key();
         let (_, gk) = gadget_params();
 
-        let preimage = crate::compact::graph::Output::release_script(
-            &Leaf::PreimageRelease { h_b: [0xAB; 32] },
-            &key,
-        );
+        // Taken from the graph's own stake, so the leaf really is in the
+        // tree whose control block is measured below.
+        let (g, _, _) = graph();
+        let stake = g
+            .nodes
+            .iter()
+            .flat_map(|n| &n.outputs)
+            .find(|o| o.role == Role::Stake)
+            .expect("a stake");
+        let preimage = stake
+            .leaves
+            .iter()
+            .find_map(|l| match l {
+                Leaf::PreimageRelease { .. } => {
+                    Some(crate::compact::graph::Output::release_script(l, &key))
+                }
+                _ => None,
+            })
+            .expect("the default graph releases by preimage");
         let gadget = crate::compact::graph::Output::release_script(
             &Leaf::GadgetRelease { key: gk },
             &key,
@@ -557,18 +573,31 @@ mod tests {
         // The witness each is spent with.  Both take one 64-byte Schnorr
         // signature and a control block; the preimage leaf additionally
         // pushes the 32-byte secret, and carries a 35-byte longer script.
-        let control = [0u8; 33]; // one leaf deep; the depth is the same either way
+        //
+        // The control block is taken from the real taptree, not assumed.
+        // The stake carries two leaves, so it has a sibling hash and is
+        // 65 bytes -- a first hand count said 33, which would have been a
+        // one-leaf tree the stake does not have.  It is the same either
+        // way, so the *difference* was right and the absolutes were not.
+        let info = stake.spend_info(&secp, &key).expect("a taptree");
+        let control = info
+            .control_block(&(preimage.clone(), LeafVersion::TapScript))
+            .expect("the release leaf is in the tree")
+            .serialize();
+        assert_eq!(control.len(), 65, "internal key, and one sibling");
         let mut w_pre = Witness::new();
         w_pre.push([0u8; 64]);
         w_pre.push([0u8; 32]);
         w_pre.push(preimage.as_bytes());
-        w_pre.push(control);
+        w_pre.push(&control);
 
         let mut w_gad = Witness::new();
         w_gad.push([0u8; 64]);
         w_gad.push(gadget.as_bytes());
-        w_gad.push(control);
+        w_gad.push(&control);
 
+        assert_eq!(w_pre.size(), 235);
+        assert_eq!(w_gad.size(), 167);
         let saved = w_pre.size() - w_gad.size();
         // 33 for the pushed preimage and its length byte, plus 35 for the
         // shorter script.  The item count stays one byte at three items or
@@ -599,6 +628,7 @@ mod publishing_in_an_output {
     use bitcoin::key::{Keypair, TapTweak};
     use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
     use bitcoin::sighash::Prevouts;
+    use bitcoin::taproot::LeafVersion;
     use bitcoin::{Amount, TapSighashType, TxOut};
 
     fn keys() -> (Secp256k1<bitcoin::secp256k1::All>, Keypair) {
