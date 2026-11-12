@@ -14,10 +14,11 @@ mod tests {
 
     /// The whole option set, written out.  Adding a code without adding
     /// it here fails to compile, which is the point.
-    const ALL: [MCode; 3] = [
+    const ALL: [MCode; 4] = [
         MCode::Malformed,
         MCode::BadProfile,
         MCode::DanglingReference,
+        MCode::DivergentReference,
     ];
 
     #[test]
@@ -28,9 +29,9 @@ mod tests {
     }
 
     #[test]
-    fn three_options_fit_a_two_bit_field() {
-        assert_eq!(ALL.len(), 3);
-        assert!(ALL.len() <= 1 << MCODE_BITS);
+    fn four_options_fit_a_two_bit_field_exactly() {
+        assert_eq!(ALL.len(), 4);
+        assert_eq!(ALL.len(), 1 << MCODE_BITS, "the field is full");
         assert_eq!(MCODE_BITS, 2, "the tree spent three bits on five codes");
     }
 
@@ -45,7 +46,7 @@ mod tests {
         // nothing here.
         // FalseOpening was never refutable at all: an opening is checked
         // against a digest the publisher's own signature committed to.
-        assert_eq!(ALL.len(), 3, "the tree had five");
+        assert_eq!(ALL.len(), 4, "the tree had five");
 
         // Each surviving option's evidence is something the disputer
         // already holds, and none of it is a comparison of two values of
@@ -62,7 +63,47 @@ mod tests {
         // fully used rather than merely sufficient.
         let mut codes: Vec<u8> = ALL.iter().map(|c| *c as u8).collect();
         codes.sort_unstable();
-        assert_eq!(codes, vec![0, 1, 2]);
+        assert_eq!(codes, vec![0, 1, 2, 3]);
+    }
+
+    // --- M6: the reference points at a diverged instance ---------------
+
+    /// The predicate deduplication needs, and the cheapest one in the
+    /// paper: two instances hold the same interval exactly when their
+    /// selection digits agree, so the negation is one differing pair.
+    #[test]
+    fn a_divergent_reference_is_witnessed_by_one_pair_of_digits() {
+        use crate::compact::dispute::divergent_reference;
+
+        // Agreeing instances: nothing to exhibit, so the option cannot be
+        // formed against an honest reference.
+        assert_eq!(divergent_reference(&[3, 7, 2], &[3, 7, 2]), None);
+
+        // Diverged at stage 2: that is the witness, and the first one.
+        assert_eq!(divergent_reference(&[3, 7, 2], &[3, 9, 2]), Some(2));
+        assert_eq!(divergent_reference(&[1, 7, 2], &[3, 9, 4]), Some(1),
+                   "the earliest divergence, not any of them");
+    }
+
+    /// The witness is two digits, so it costs two digits.  Compare M1,
+    /// whose evidence is 222 bytes, and M4, whose binding is 160.
+    #[test]
+    fn m6_is_two_orders_cheaper_than_the_options_it_joins() {
+        use crate::compact::checkpoints::selection_bits;
+        let digit_bits = selection_bits(192);
+        assert_eq!(digit_bits, 8);
+        // Two eight-bit digits against 222 bytes of M1 evidence.
+        assert!(2 * digit_bits as usize / 8 * 100 < 222,
+                "two digits must be far under M1's evidence");
+    }
+
+    /// And it needs no garbled circuit: Script already verifies digits.
+    #[test]
+    fn m6_names_evidence_that_is_already_on_chain() {
+        use crate::compact::dispute::{evidence_for, MCode};
+        let e = evidence_for(MCode::DivergentReference);
+        assert!(e.contains("already on chain"), "{e}");
+        assert!(!e.contains("proof"), "no proof is published for M6: {e}");
     }
 
     // --- C09: the empty annex ------------------------------------------

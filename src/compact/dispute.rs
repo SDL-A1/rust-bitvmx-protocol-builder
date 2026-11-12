@@ -384,11 +384,13 @@ pub enum MCode {
     /// The slot was not spent with the protocol's signature-hash profile.
     BadProfile = 1,
     /// The reference points at a stage that published nothing.
-    ///
-    /// Conditional on deduplication existing, which for an interval search
-    /// it does not yet: a reference must bind to an interval and a stage
-    /// rather than to a tree node, and that is not written.
     DanglingReference = 2,
+    /// The reference points at an instance that had already diverged, so
+    /// the publication it names dissects a different interval.
+    ///
+    /// This is what the tree got free from M2 and an interval does not.
+    /// See [`divergent_reference`].
+    DivergentReference = 3,
 }
 
 /// Where each option's evidence comes from.  Every one of them is the
@@ -398,10 +400,11 @@ pub fn evidence_for(code: MCode) -> &'static str {
         MCode::Malformed => "a FlatMerkle malformation proof, O(log N)",
         MCode::BadProfile => "the publisher's own signature",
         MCode::DanglingReference => "the referenced publisher's signature",
+        MCode::DivergentReference => "two selection digits, already on chain",
     }
 }
 
-/// Three codes fit a two-bit option field.
+/// Four codes fit a two-bit option field, exactly.
 ///
 /// The tree had five and spent three bits.  Two of those five do not
 /// survive the interval: `WrongNode`, which policed a parent-child
@@ -412,4 +415,54 @@ pub fn evidence_for(code: MCode) -> &'static str {
 /// refutable, and `entry_holds` says so. It was introduced here to keep
 /// the count at five when `WrongNode` went, which is backwards: the count
 /// is a consequence, not a target.
+///
+/// `DivergentReference` is the one addition, and it is what lets
+/// deduplication run at all here -- see [`divergent_reference`].  It fits
+/// the field the other three already needed.
 pub const MCODE_BITS: u32 = 2;
+
+// ---------------------------------------------------------------------
+// M6: the reference points at an instance that had diverged
+// ---------------------------------------------------------------------
+
+/// Is this reference refuted?
+///
+/// A deduplicating party asserts that the bytes it owes in *this* instance
+/// are bytes it already published in *that* one.  The spend of the
+/// `Dedup` output proves the other stage confirmed and `BadProfile`
+/// proves it was not empty; neither proves it dissects this instance's
+/// live interval.  The tree got that from M2, whose opening check a
+/// misdirected reference failed; an interval has no parent node and so no
+/// M2, which is why deduplication did not transfer.
+///
+/// It transfers after all, and more cheaply than the option it replaces.
+/// The live interval at stage `s` is a function of the selection digits
+/// at stages `1..s` and of nothing else -- `search::Interval::subinterval`
+/// applied in turn -- and that function is injective, so two instances
+/// hold the same interval exactly when their digit prefixes agree.  Each
+/// digit is already on chain in the clear, under a one-time key belonging
+/// to one instance and one stage, so the predicate's negation is
+/// witnessed by a single pair of differing digits.
+///
+/// There is no circuit here and no binding.  Script verifies the two
+/// one-time signatures under keys fixed at setup and compares eight-bit
+/// values, which is the same `verify_digits` the selections already use.
+/// Re-revealing a digit is not equivocation: a one-time key is punishable
+/// on a second *different* message, and this is the same one.
+///
+/// `here` and `there` are the two instances' digits for stages `1..s`.
+/// Returns the first stage at which they differ, which is the witness.
+pub fn divergent_reference(here: &[usize], there: &[usize]) -> Option<usize> {
+    here.iter()
+        .zip(there)
+        .position(|(a, b)| a != b)
+        .map(|i| i + 1)
+}
+
+/// What the refutation puts in the witness: one stage, two digits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DivergenceWitness {
+    pub stage: usize,
+    pub here: usize,
+    pub there: usize,
+}
