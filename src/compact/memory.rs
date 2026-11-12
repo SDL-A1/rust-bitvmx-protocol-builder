@@ -14,10 +14,30 @@
 use bitcoin::hashes::{sha256, Hash};
 use std::collections::{BTreeSet, HashMap};
 
-/// A memory slot.
+/// The first paper's leaf: a thirty-two-byte memory slot.
 pub const SLOT: usize = 32;
+
+/// This paper's leaf: one four-byte machine word.
+///
+/// The machine operates on words.  Authenticating slots and then carrying
+/// whole slots into the circuit is twenty-eight bytes of context per
+/// access that the instruction's semantics never read.  Narrowing the
+/// *tree* keeps the pre- and post-state roots and the authenticated
+/// contents and only shrinks their width.
+pub const WORD: usize = 4;
+
+/// Depth over 2^20 bytes of memory, by leaf width: 2^15 slots, 2^18 words.
+pub const SLOT_LEVELS: u32 = 15;
+pub const WORD_LEVELS: u32 = 18;
+
 /// A tree node, truncated like every other digest in the protocol.
 pub const NODE: usize = 20;
+
+/// 32 registers of four bytes are 128 bytes, which is four slots or
+/// thirty-two words.  rs1, rs2 and rd are three distinct words either
+/// way; at slot granularity they may share a leaf and at word granularity
+/// they cannot, which makes the word multiproof slightly larger.
+pub const REG_WORDS: usize = 32;
 
 pub type MemNode = [u8; NODE];
 
@@ -184,4 +204,41 @@ pub fn touched(p: Pattern, pc: usize, data: usize, regs: [usize; 3]) -> Vec<usiz
     v.sort_unstable();
     v.dedup();
     v
+}
+
+// ---------------------------------------------------------------------
+// The word-granular tree of Compact BitVMX II.
+// ---------------------------------------------------------------------
+
+/// The words an instruction of this shape touches.
+///
+/// Same access model as the slot tree, for the same two reasons.
+/// BitVMX-CPU rejects unaligned reads, writes and jumps, so every fetch
+/// and every load or store is a four-byte aligned word -- nothing
+/// straddles, and at this granularity a word *is* a leaf, so the question
+/// does not even arise.  RISC-V is load/store, so no instruction both
+/// touches memory and names three registers.
+///
+/// Four touched leaves is the maximum, exactly as at slot granularity.
+/// What differs is that the three registers are now always three distinct
+/// leaves, where at slot granularity they could share one.
+pub fn touched_words(p: Pattern, pc: usize, data: usize, regs: [usize; 3]) -> Vec<usize> {
+    let mut v: Vec<usize> = match p {
+        Pattern::Worst => vec![regs[0], regs[2], pc, data],
+        Pattern::Alu => vec![pc, regs[0], regs[1], regs[2]],
+        Pattern::Load => vec![pc, data, regs[0], regs[2]],
+        Pattern::Store => vec![pc, regs[0], regs[1], data],
+    };
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// The step message of Definition 8.2: two roots, a program counter, an
+/// instruction word, and one address-and-contents pair per touched leaf.
+///
+/// At word granularity a pair is four plus four bytes, where at slot
+/// granularity it was four plus thirty-two.
+pub fn step_message_bytes(leaf: usize, leaves: usize) -> usize {
+    2 * NODE + 4 + 4 + leaves * (4 + leaf)
 }

@@ -4,6 +4,7 @@ pub mod builder_outputs_test;
 pub mod builder_persistance_test;
 pub mod compact_fraud_test;
 pub mod compact_dispute_test;
+pub mod compact_endgame_test;
 pub mod compact_search_test;
 pub mod compact_test;
 
@@ -16,7 +17,7 @@ pub mod compact_test;
 //
 //   pub mod compact_circuit_test;    // 18 tests, uses compact::graph
 
-//   pub mod compact_endgame_test;    // 16 tests, uses compact::messages
+
 //   pub mod compact_graph_test;      // 23 tests, the stage graph itself
 
 pub mod graph_test;
