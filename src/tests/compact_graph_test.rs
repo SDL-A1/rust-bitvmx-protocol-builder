@@ -356,6 +356,110 @@ mod tests {
         }
     }
 
+    // ------------------------------- the single-evaluation invariant (gsig)
+
+    /// All the transactions that spend a given outpoint.  Any two of them
+    /// conflict, so at most one can ever confirm.
+    fn spenders<'a>(g: &'a Graph, tx: &str, vout: usize) -> Vec<&'a str> {
+        let target = g.get(tx).txid();
+        g.nodes
+            .iter()
+            .filter(|n| {
+                n.tx.input.iter().any(|i| {
+                    i.previous_output.txid == target
+                        && i.previous_output.vout == vout as u32
+                })
+            })
+            .map(|n| n.name.as_str())
+            .collect()
+    }
+
+    /// `gsig::SINGLE_EVALUATION`, discharged against this graph as far as
+    /// the graph can discharge it.
+    ///
+    /// The argument is a UTXO argument and it is short. The accuser's
+    /// `Dispute` transaction is what opens the one-time commitments and so
+    /// delivers one label per input wire: one transaction, one assignment.
+    /// It creates exactly one output. Every transaction that could consume
+    /// that output spends the same outpoint, so any two of them conflict
+    /// and at most one confirms. One garbling, one feeding, one evaluation.
+    ///
+    /// What makes this worth asserting rather than asserting in prose is
+    /// that it is a property of the *shape*, and the shape is what a later
+    /// edit would change silently.
+    #[test]
+    fn the_gadget_is_fed_once_because_its_labels_come_from_one_outpoint() {
+        let (g, _, _) = graph();
+
+        // One feeding. The accuser's Dispute carries the opened labels,
+        // and it is a single node of the graph.
+        let disputes: Vec<&str> = g
+            .nodes
+            .iter()
+            .filter(|n| n.name == "Dispute")
+            .map(|n| n.name.as_str())
+            .collect();
+        assert_eq!(disputes.len(), 1, "a second Dispute would be a second feeding");
+
+        // It offers exactly one output for the evaluation to consume.
+        let d = g.get("Dispute");
+        assert_eq!(d.tx.output.len(), 1);
+        assert_eq!(d.outputs[0].role, Role::AnswerSlot);
+
+        // Every consumer spends that one outpoint, so they are mutually
+        // exclusive by construction rather than by any rule of ours.
+        let consumers = spenders(&g, "Dispute", 0);
+        assert_eq!(
+            consumers.len(),
+            2,
+            "the answer and its timeout, and nothing else: {consumers:?}"
+        );
+        assert!(consumers.contains(&"Answer"));
+        assert!(consumers.contains(&"MissingAnswer"));
+
+        let outpoints: HashSet<_> = consumers
+            .iter()
+            .map(|n| g.get(n).tx.input[0].previous_output)
+            .collect();
+        assert_eq!(
+            outpoints.len(),
+            1,
+            "they must conflict, not merely be alternatives"
+        );
+    }
+
+    /// And the part this graph does *not* discharge, stated so that it is
+    /// not mistaken for covered.
+    ///
+    /// With more than two parties the endgame still has a single `Dispute`,
+    /// so the invariant holds here only because the concurrent case is not
+    /// modelled. A graph that gave each challenger its own endgame would
+    /// need a garbling each -- sharing one across challengers is exactly
+    /// the two-evaluation failure, and it hands over the key rather than
+    /// degrading. Deduplication shares *publications*, never garblings.
+    #[test]
+    fn concurrent_challengers_do_not_share_an_endgame_yet() {
+        let secp = Secp256k1::new();
+        let kp = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[0x77; 32]).unwrap());
+        let (key, _) = kp.x_only_public_key();
+
+        for parties in [2usize, 3, 5] {
+            let g = Graph::build(
+                &secp,
+                &key,
+                Params {
+                    parties,
+                    ..Params::default()
+                },
+            );
+            let n = g.nodes.iter().filter(|x| x.name == "Dispute").count();
+            assert_eq!(
+                n, 1,
+                "{parties} parties still share one endgame, so the                  single-evaluation question has not been asked yet"
+            );
+        }
+    }
+
     // ------------------------------------------- the gadget's release leaf
 
     fn gadget_params() -> (Params, XOnlyPublicKey) {
