@@ -86,9 +86,23 @@ pub const MSG_BITS: usize = 256;
 ///
 /// Kept as a constant so that a graph test can `assert` against something
 /// named rather than against a sentence in a doc comment.
+///
+/// Note what it does *not* say.  "Once, by one party" are sufficient
+/// conditions and were how this was first phrased; the necessary one is
+/// about the assignment, because the attack needs both labels of a wire
+/// and two evaluations on the same inputs hand out the same label on
+/// every one of them.  `two_evaluations_on_one_assignment_leak_nothing`
+/// checks that.
+///
+/// The distinction decides whether concurrent challengers could share a
+/// garbling, and the answer is no -- but for a reason about the protocol
+/// rather than about garbling.  Each challenger must be paid by its own
+/// transaction, so the circuit must compute a different message for each,
+/// so the message wires take different values however identical the
+/// inputs are.
 pub const SINGLE_EVALUATION: &str =
-    "each garbling of a signature gadget is evaluated at most once, by at \
-     most one party, on at most one input assignment";
+    "each garbling of a signature gadget is evaluated on at most one input \
+     assignment; evaluating it twice on the same one is harmless";
 
 /// One tweak per dispute option, so material from one gadget cannot be
 /// replayed against another.  These mirror `release::*_TWEAK`.

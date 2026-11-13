@@ -196,5 +196,67 @@ mod tests {
             p = p + p;
         }
     }
+    /// What the invariant actually forbids, which is narrower than how
+    /// `SINGLE_EVALUATION` phrases it.
+    ///
+    /// The attack needs both labels of one message wire.  Two evaluations
+    /// of the same garbling on the *same* assignment hand out the same
+    /// label on every wire, so they leak nothing -- "evaluated once, by
+    /// one party" are sufficient conditions, and the necessary one is
+    /// "on one input assignment".
+    ///
+    /// This matters for concurrent challengers: it says exactly when a
+    /// garbling could be shared, and the answer turns out to be never,
+    /// because each challenger must be paid by a different transaction
+    /// and so the circuit must compute a different message for each.
+    #[test]
+    fn two_evaluations_on_one_assignment_leak_nothing() {
+        let signer = Signer::new(&[0x11; 32]);
+        let key = signer.affine(&[0x22; 32]);
+        let msg = [0xABu8; 32];
+        let e = signer.challenge(&key.r_x, &msg);
+        let bits = gsig::scalar_bits(&e);
 
+        let (c, wires) = identity_256();
+        let g = Garbled::new(&c, labels(7));
+        let sig = gsig::garble(M4_SIG_TWEAK, &g, &wires, &key);
+
+        // Two evaluators, same assignment.
+        let held = |b: &[bool]| -> Vec<Label> {
+            let mut inputs = b.to_vec();
+            inputs.push(false);
+            let out = geval(&c, g.tables(), &g.encode(&c, &inputs));
+            wires.iter().map(|&w| out[w]).collect()
+        };
+        let a = held(&bits);
+        let b = held(&bits);
+        assert_eq!(a, b, "the same assignment gives the same labels");
+
+        // So no wire has both of its labels, and the extraction has
+        // nothing to work with.
+        for i in 0..MSG_BITS {
+            assert_eq!(a[i], b[i]);
+        }
+        assert_eq!(
+            gsig::evaluate(M4_SIG_TWEAK, &sig, &a).sig,
+            gsig::evaluate(M4_SIG_TWEAK, &sig, &b).sig,
+            "and both produce the same signature, which is the point"
+        );
+
+        // One differing bit is all it takes, though.
+        let mut other = bits.clone();
+        other[137] = !other[137];
+        let c2 = held(&other);
+        assert_ne!(a[137], c2[137], "now both labels of wire 137 are out");
+        let (zero, one) = if gsig::scalar_bits(&e)[137] {
+            (c2[137], a[137])
+        } else {
+            (a[137], c2[137])
+        };
+        assert_eq!(
+            gsig::recover_key(M4_SIG_TWEAK, &sig, 137, &zero, &one).unwrap(),
+            key.b.serialize(),
+            "two assignments differing in one bit hand over the key"
+        );
+    }
 }
