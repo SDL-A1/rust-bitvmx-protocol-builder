@@ -13,6 +13,7 @@ pub mod compact_gsig_test;
 pub mod compact_publish_test;
 pub mod compact_search_test;
 pub mod compact_test;
+pub mod compliance_circuit_test;
 
 pub mod dispute_weight_test;
 pub mod graph_test;

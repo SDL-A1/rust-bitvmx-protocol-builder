@@ -124,8 +124,10 @@ mod tests {
         let c = a3();
         assert_eq!(c.n_inputs, 450, "289 bits of step, 161 of claim");
         assert_eq!(c.n_outputs, 1, "a verdict, not a state");
-        assert_eq!(c.gates.len(), 11_317);
-        assert_eq!(c.and_count(), 3_437);
+        // 11,317 / 3,437 before `lh` was fixed to sign-extend from bit
+        // 15 rather than bit 7, which costs 16 AND gates.
+        assert_eq!(c.gates.len(), 11_365);
+        assert_eq!(c.and_count(), 3_453);
     }
 
     #[test]
@@ -285,11 +287,11 @@ mod tests {
     fn the_published_material_is_what_the_paper_says() {
         let e = Endgame::setup(a3(), A3_TWEAK, &[0u8; 32], labels_from(23));
         let p = e.published();
-        assert_eq!(p.tables.size(), 3_437 * 32, "two ciphertexts an AND gate");
+        assert_eq!(p.tables.size(), 3_453 * 32, "two ciphertexts an AND gate");
         assert_eq!(p.commitments.len(), 450);
         // 110 kB of table, and 32 bytes of ct
-        assert_eq!(p.tables.size(), 109_984);
-        assert_eq!(p.size(), 109_984 + 450 * 64 + 32);
+        assert_eq!(p.tables.size(), 110_496);
+        assert_eq!(p.size(), 110_496 + 450 * 64 + 32);
     }
 
     // -- the spend ------------------------------------------------------

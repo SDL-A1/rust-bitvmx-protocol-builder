@@ -67,9 +67,9 @@ mod tests {
         let c = circuit();
         assert_eq!(c.n_inputs, 450, "the same interface as rv32i_verdict");
         assert_eq!(c.n_outputs, 1, "one bit, which gates the secret");
-        assert_eq!(c.and_count(), 7_288);
-        // The M extension roughly doubles the step: rv32i_verdict is 3,437.
-        assert!(c.and_count() > 2 * 3_437 - 500);
+        assert_eq!(c.and_count(), 7_304);
+        // The M extension roughly doubles the step: rv32i_verdict is 3,453.
+        assert!(c.and_count() > 2 * 3_453 - 500);
     }
 
     #[test]
