@@ -2,20 +2,19 @@ pub mod autovalues_fees_test;
 pub mod builder_connection_test;
 pub mod builder_outputs_test;
 pub mod builder_persistance_test;
-pub mod compact_fraud_test;
-pub mod compact_graph_test;
-pub mod compact_gadget_spend_test;
-pub mod compact_gsig_test;
 pub mod compact_annex_signing_test;
-pub mod compact_publish_test;
 pub mod compact_circuit_test;
 pub mod compact_dispute_test;
 pub mod compact_endgame_test;
+pub mod compact_fraud_test;
+pub mod compact_gadget_spend_test;
+pub mod compact_graph_test;
+pub mod compact_gsig_test;
+pub mod compact_publish_test;
 pub mod compact_search_test;
 pub mod compact_test;
 
-
-
+pub mod dispute_weight_test;
 pub mod graph_test;
 pub mod input_test;
 pub mod ots_checksig;
