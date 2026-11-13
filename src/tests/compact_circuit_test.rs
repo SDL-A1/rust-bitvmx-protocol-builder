@@ -132,13 +132,15 @@ mod tests {
     fn plain_evaluation_agrees_with_the_model() {
         let c = a3();
         let v = vectors();
-        assert_eq!(v.len(), 128);
+        // 192 since the emitter was widened from six arithmetic
+        // opcodes to ten; half are lies either way.
+        assert_eq!(v.len(), 192);
         let mut lies = 0;
         for (name, ins, want) in &v {
             assert_eq!(c.outputs(&c.eval(ins))[0], *want, "{name}");
             lies += usize::from(*want);
         }
-        assert_eq!(lies, 64, "half the vectors are lies");
+        assert_eq!(lies, 96, "half the vectors are lies");
     }
 
     // -- the garbling ---------------------------------------------------
@@ -242,7 +244,7 @@ mod tests {
                 Outcome::NotAnOpening => panic!("{name}: the prover's own opening"),
             }
         }
-        assert_eq!((refuted, stood), (64, 64));
+        assert_eq!((refuted, stood), (96, 96));
     }
 
     #[test]

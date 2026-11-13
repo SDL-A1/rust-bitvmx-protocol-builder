@@ -19,6 +19,7 @@ pub mod graph_test;
 pub mod input_test;
 pub mod ots_checksig;
 pub mod output_test;
+pub mod rv32im_verdict_test;
 pub mod sha256_circuit_test;
 pub mod single_scripts_test;
 pub mod utils;
