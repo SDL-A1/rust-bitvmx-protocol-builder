@@ -175,3 +175,95 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tests_support {
+    use crate::compact::bristol::Circuit;
+
+    const RV32IM: &str = include_str!("fixtures/rv32im_verdict.bristol");
+    const HONEST_DIV: &str = include_str!("fixtures/rv32im_honest_div.vectors");
+
+    pub fn circuit_for_support() -> Circuit {
+        Circuit::parse(RV32IM).expect("the rv32im fixture parses")
+    }
+
+    /// `(name, inputs, verdict)` for honest divisions claimed honestly.
+    pub fn honest_div_vectors() -> Vec<(String, Vec<bool>, bool)> {
+        HONEST_DIV
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                let mut it = l.split_whitespace();
+                let name = it.next().unwrap().to_string();
+                let ins = it.next().unwrap().bytes().map(|b| b == b'1').collect();
+                let out = it.next().unwrap() == "1";
+                (name, ins, out)
+            })
+            .collect()
+    }
+}
+
+/// A defect in the division circuit, pinned so it cannot go unnoticed.
+///
+/// `div` and `rem` are not built as dividers. The prover witnesses the
+/// quotient and remainder as non-deterministic inputs and the circuit
+/// checks `q*d + r == n` with the multiplier it already has — which is
+/// why the whole M extension costs 3,851 AND gates rather than a
+/// divider's worth more, and why 64 bits of witness have to be committed
+/// on chain.
+///
+/// The check mishandles one case. When the quotient is **zero** and the
+/// dividend is **negative**, the product is zero, so its high word is all
+/// zeros; but `q*d + r` is then negative and its sixty-four-bit form needs
+/// a high word of all ones. The remainder is not sign-extended into the
+/// product before the consistency check, so `check_2` sees a positive high
+/// word against a negative low word and the division is flagged as
+/// faulty.
+///
+/// The consequence is not a soundness hole but a liveness one, and it is
+/// severe: an **honest** prover who executes `div(-1, 2)` claims no fault,
+/// the circuit says there was one, and she is refuted and loses her stake
+/// for a correct instruction. `|n| < |d|` with `n` negative is an ordinary
+/// thing for a program to do.
+///
+/// These tests assert the defect. They will fail when it is fixed, which
+/// is the point.
+#[cfg(test)]
+mod division_defect {
+    use super::tests_support::*;
+
+    #[test]
+    fn an_honest_division_with_a_zero_quotient_and_negative_dividend_is_refuted() {
+        let wrongly_refuted: Vec<String> = honest_div_vectors()
+            .into_iter()
+            .filter(|(_, _, refuted)| *refuted)
+            .map(|(name, _, _)| name)
+            .collect();
+        assert_eq!(
+            wrongly_refuted,
+            vec!["div_-1_2", "div_-7_-9", "rem_-1_2"],
+            "exactly the zero-quotient, negative-dividend cases"
+        );
+    }
+
+    #[test]
+    fn every_other_honest_division_stands() {
+        for (name, _, refuted) in honest_div_vectors() {
+            let zero_q_negative_n = matches!(name.as_str(), "div_-1_2" | "div_-7_-9" | "rem_-1_2");
+            assert_eq!(
+                refuted, zero_q_negative_n,
+                "{name}: only the known defect may refute an honest claim"
+            );
+        }
+    }
+
+    #[test]
+    fn the_circuit_agrees_with_itself_on_these_vectors() {
+        // The recorded verdicts are what the circuit answers, not what it
+        // ought to answer, so this checks the fixture is current.
+        let c = circuit_for_support();
+        for (name, ins, want) in honest_div_vectors() {
+            assert_eq!(c.outputs(&c.eval(&ins))[0], want, "{name}");
+        }
+    }
+}

@@ -155,3 +155,60 @@ when to deduplicate, and the pointer from the duplicate to the original.
 It was left out on purpose. The construction's result is a publication
 cost, and deduplication is an optimisation on top of a cost that is
 already measured.
+
+## 5. The division circuit rejects some honest divisions
+
+`div` and `rem` are not built as dividers.  The prover witnesses the
+quotient and remainder as non-deterministic inputs (`nd_div`, `nd_mod`)
+and the circuit checks `q*d + r == n` with the multiplier it already has.
+That is why the whole M extension costs 3,851 AND gates rather than a
+divider's worth more, and why 64 bits of witness are in the input
+interface of both circuits -- RV32I allocates them too, unused, which is
+why both are 450 bits wide.
+
+The check mishandles one case.  When the quotient is **zero** and the
+dividend is **negative**, the product is zero and its high word is all
+zeros; but `q*d + r` is then negative, and its sixty-four-bit form needs a
+high word of all ones.  The remainder is not sign-extended into the
+product before the consistency check, so `check_2` compares a zero high
+word against a set sign bit and the division is flagged as faulty.
+
+Measured, in `riscv.py`'s `create_multiply_opcodes`:
+
+| case | q | r | verdict on an honest claim |
+|---|---:|---:|---|
+| `div(-1, 2)`   | 0 | -1 | **wrongly refuted** |
+| `div(-7, -9)`  | 0 | -7 | **wrongly refuted** |
+| `rem(-1, 2)`   | 0 | -1 | **wrongly refuted** |
+| `div(-5, 3)`   | -1 | -2 | stands |
+| `div(-10, 3)`  | -3 | -1 | stands |
+| `div(7, 9)`    | 0 | 7 | stands |
+| `divu(7, 9)`   | 0 | 7 | stands |
+
+This is a liveness failure rather than a soundness one, and it is severe:
+an honest prover who executes `div(-1, 2)` claims no fault, the circuit
+says there was one, and she is refuted and loses her stake for a correct
+instruction.  `|n| < |d|` with `n` negative is an ordinary thing for a
+program to do.
+
+`rv32im_honest_div.vectors` is the evidence and
+`rv32im_verdict_test::division_defect` pins it, asserting the defect so
+that the tests fail when it is fixed.
+
+The emulator is not affected -- it computes with Rust's own `/` and `%` --
+and its division tests never reach the case: they cover divide by zero,
+overflow, and four non-zero quotients.  Whether
+`bitcoin-script-riscv`'s separate `div`/`rem` scripts share the defect is
+**untested**, and should be the first thing checked, because if Script is
+correct then the two backends disagree about a valid instruction.
+
+What to do:
+
+- [ ] Sign-extend `nd_mod` into the sixty-four-bit product before
+      `verify`, in `create_multiply_opcodes`
+- [ ] Check `bitcoin-script-riscv`'s `div`/`rem` against the same cases
+- [ ] Re-emit the fixtures; the gate count will move
+- [ ] Enable `bad_witness_vectors` in `emit.py`, which is written and not
+      called: it asserts that a prover who corrupts the quotient *and*
+      claims the corrupted result is still refuted, which is the soundness
+      direction and could not be tested while honest cases were failing
