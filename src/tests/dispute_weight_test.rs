@@ -159,6 +159,14 @@ mod tests {
         /// stage transaction's own witness, which is the whole reason a
         /// stage's txid stays fixed at setup.
         pub const OPRETURN_FURNITURE: usize = 968;
+        /// One dissection as an ordinals-style tapscript envelope: the
+        /// payload as a run of pushes inside `OP_FALSE OP_IF .. OP_ENDIF`.
+        /// Script bytes ride in the witness at one weight unit each, so
+        /// this is marginally *below* the framed annex.
+        pub const PUBLICATION_ENVELOPE: usize = 8_115;
+        /// What an envelope costs beyond its payload: a 65-byte control
+        /// block for a two-leaf taptree and the commit transaction, 443 WU.
+        pub const ENVELOPE_FURNITURE: usize = 508;
         /// tau committed under ACW (4,16).
         pub const ACW_TAU: usize = 21_402;
         /// Refuting one node of the multiproof, in a circuit.
@@ -170,6 +178,7 @@ mod tests {
     enum Medium {
         Annex,
         OpReturn,
+        Envelope,
     }
 
     impl Medium {
@@ -177,6 +186,7 @@ mod tests {
             match self {
                 Medium::Annex => "annex",
                 Medium::OpReturn => "OP_RETURN",
+                Medium::Envelope => "envelope",
             }
         }
 
@@ -186,6 +196,9 @@ mod tests {
                 Medium::Annex => from_the_paper::PUBLICATION_ANNEX,
                 Medium::OpReturn => {
                     from_the_paper::PUBLICATION_OPRETURN + from_the_paper::OPRETURN_FURNITURE
+                }
+                Medium::Envelope => {
+                    from_the_paper::PUBLICATION_ENVELOPE + from_the_paper::ENVELOPE_FURNITURE
                 }
             }
         }
@@ -269,7 +282,7 @@ mod tests {
         }
 
         // ---- compact: b = 192, four stages, always full-duplex ---------
-        for medium in [Medium::Annex, Medium::OpReturn] {
+        for medium in [Medium::Annex, Medium::OpReturn, Medium::Envelope] {
             let rounds = 4usize;
             let (p_stages, v_stages) = dissection_split(rounds, true);
             let stage = medium.stage_publication() + digit;
@@ -279,9 +292,25 @@ mod tests {
             // on a transaction that was pre-signed before its contents were
             // known.
             let publications = rounds as u32 + 1;
+            // Transactions a publication costs off the spine.
+            //
+            // An annex rides in the stage transaction's own witness and
+            // costs none: a witness annex is not covered by the txid,
+            // which is exactly why the stage stays pre-signable.
+            //
+            // An OP_RETURN is an output and so *is* covered, needing one
+            // transaction of its own.
+            //
+            // An envelope is witness data too, but it lives in a
+            // *tapscript*, and a tapscript is committed to by the taproot
+            // output being spent.  The output must therefore exist before
+            // the data is known, which a pre-signed graph cannot arrange:
+            // it takes a commit transaction to create that output and a
+            // reveal to spend it.  Two, not one.
             let extra_tx = match medium {
                 Medium::Annex => 0,
                 Medium::OpReturn => publications,
+                Medium::Envelope => 2 * publications,
             };
             let search_tx = search_messages(rounds as u32, true) + extra_tx;
 
@@ -435,6 +464,7 @@ mod tests {
         assert!(rows[2].total() < rows[1].total());
         // Under OP_RETURN every publication costs a transaction of its own.
         assert_eq!(rows[4].transactions, rows[2].transactions + 5);
+        assert_eq!(rows[6].transactions, rows[2].transactions + 10);
 
         // The question the r=3 row exists to answer: at the same number of
         // transactions BitVMX full-duplex needs, what does the Script
@@ -443,7 +473,7 @@ mod tests {
         // garbled-free option, it is a real improvement on what BitVMX
         // would be with a full-duplex search and no publication.
         let bitvmx_fd = &rows[1];
-        let script_r3 = &rows[7];
+        let script_r3 = &rows[9];
         assert_eq!(script_r3.transactions, bitvmx_fd.transactions, "12 each");
         assert!(script_r3.total() * 2 < bitvmx_fd.total(), "less than half");
         assert!(script_r3.prover < bitvmx_fd.prover);
