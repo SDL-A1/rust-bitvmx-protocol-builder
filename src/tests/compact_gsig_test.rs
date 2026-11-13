@@ -132,7 +132,7 @@ mod tests {
     /// which for Schnorr is the signing key.
     #[test]
     fn both_labels_of_one_wire_recover_the_key() {
-        assert!(SINGLE_EVALUATION.contains("at most once"));
+        assert!(SINGLE_EVALUATION.contains("at most one input assignment"));
 
         let signer = Signer::new(&[0x55; 32]);
         let key = signer.affine(&[0x66; 32]);
