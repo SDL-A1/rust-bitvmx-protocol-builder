@@ -182,15 +182,25 @@ mod tests_support {
 
     const RV32IM: &str = include_str!("fixtures/rv32im_verdict.bristol");
     const HONEST_DIV: &str = include_str!("fixtures/rv32im_honest_div.vectors");
+    const BAD_WITNESS: &str = include_str!("fixtures/rv32im_bad_witness.vectors");
 
     pub fn circuit_for_support() -> Circuit {
         Circuit::parse(RV32IM).expect("the rv32im fixture parses")
     }
 
+    /// `(name, inputs, verdict)` for a prover who corrupts the quotient
+    /// and claims the corrupted result.
+    pub fn bad_witness_vectors() -> Vec<(String, Vec<bool>, bool)> {
+        parse(BAD_WITNESS)
+    }
+
     /// `(name, inputs, verdict)` for honest divisions claimed honestly.
     pub fn honest_div_vectors() -> Vec<(String, Vec<bool>, bool)> {
-        HONEST_DIV
-            .lines()
+        parse(HONEST_DIV)
+    }
+
+    fn parse(src: &str) -> Vec<(String, Vec<bool>, bool)> {
+        src.lines()
             .filter(|l| !l.trim().is_empty())
             .map(|l| {
                 let mut it = l.split_whitespace();
@@ -203,67 +213,80 @@ mod tests_support {
     }
 }
 
-/// A defect in the division circuit, pinned so it cannot go unnoticed.
+/// Division is witnessed, and the witness is checked.
 ///
 /// `div` and `rem` are not built as dividers. The prover witnesses the
 /// quotient and remainder as non-deterministic inputs and the circuit
 /// checks `q*d + r == n` with the multiplier it already has — which is
 /// why the whole M extension costs 3,851 AND gates rather than a
-/// divider's worth more, and why 64 bits of witness have to be committed
-/// on chain.
+/// divider's worth more, and why 64 bits of witness ride in the input
+/// interface and have to be committed on chain.
 ///
-/// The check mishandles one case. When the quotient is **zero** and the
-/// dividend is **negative**, the product is zero, so its high word is all
-/// zeros; but `q*d + r` is then negative and its sixty-four-bit form needs
-/// a high word of all ones. The remainder is not sign-extended into the
-/// product before the consistency check, so `check_2` sees a positive high
-/// word against a negative low word and the division is flagged as
-/// faulty.
+/// Both directions are tested here, and they are different properties:
 ///
-/// The consequence is not a soundness hole but a liveness one, and it is
-/// severe: an **honest** prover who executes `div(-1, 2)` claims no fault,
-/// the circuit says there was one, and she is refuted and loses her stake
-/// for a correct instruction. `|n| < |d|` with `n` negative is an ordinary
-/// thing for a program to do.
-///
-/// These tests assert the defect. They will fail when it is fixed, which
-/// is the point.
+/// - **Honest divisions stand.** An earlier revision added a 32-bit
+///   remainder to a 64-bit product, which `add_adder` silently truncated,
+///   so the check compared the *product's* sign against the *sum's*.
+///   Those differ exactly when `q*d + r` is negative and `q*d` is not — a
+///   zero quotient with a negative dividend — and `div(-1, 2)` refuted an
+///   honest prover. Sign-extending the remainder fixed it at no cost in
+///   AND gates: the extra work is all XOR, which free-XOR makes free.
+/// - **Witnessed lies are refuted.** The dangerous prover corrupts the
+///   quotient *and* claims the corrupted result, so the result comparison
+///   passes and only the status bit catches her.
 #[cfg(test)]
-mod division_defect {
+mod division_witness {
     use super::tests_support::*;
 
     #[test]
-    fn an_honest_division_with_a_zero_quotient_and_negative_dividend_is_refuted() {
-        let wrongly_refuted: Vec<String> = honest_div_vectors()
-            .into_iter()
-            .filter(|(_, _, refuted)| *refuted)
-            .map(|(name, _, _)| name)
+    fn every_honest_division_stands() {
+        let vs = honest_div_vectors();
+        assert_eq!(vs.len(), 10, "ten honest divisions");
+        let refuted: Vec<String> = vs
+            .iter()
+            .filter(|(_, _, r)| *r)
+            .map(|(n, _, _)| n.clone())
             .collect();
-        assert_eq!(
-            wrongly_refuted,
-            vec!["div_-1_2", "div_-7_-9", "rem_-1_2"],
-            "exactly the zero-quotient, negative-dividend cases"
+        assert!(
+            refuted.is_empty(),
+            "an honest division must never be refuted: {refuted:?}"
         );
     }
 
     #[test]
-    fn every_other_honest_division_stands() {
-        for (name, _, refuted) in honest_div_vectors() {
-            let zero_q_negative_n = matches!(name.as_str(), "div_-1_2" | "div_-7_-9" | "rem_-1_2");
-            assert_eq!(
-                refuted, zero_q_negative_n,
-                "{name}: only the known defect may refute an honest claim"
-            );
+    fn the_zero_quotient_negative_dividend_cases_are_covered() {
+        // The three that used to fail, named so the regression is explicit.
+        let names: Vec<String> = honest_div_vectors()
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
+        for case in ["div_-1_2", "div_-7_-9", "rem_-1_2"] {
+            assert!(names.contains(&case.to_string()), "{case} must be tested");
         }
     }
 
     #[test]
-    fn the_circuit_agrees_with_itself_on_these_vectors() {
-        // The recorded verdicts are what the circuit answers, not what it
-        // ought to answer, so this checks the fixture is current.
+    fn a_witnessed_lie_is_still_refuted() {
+        // The soundness direction, which could not be tested while honest
+        // divisions were failing: the prover corrupts the quotient and
+        // claims what the corrupted witness produces.
+        let vs = bad_witness_vectors();
+        assert_eq!(vs.len(), 24, "six rounds over four division opcodes");
+        for (name, _, refuted) in &vs {
+            assert!(refuted, "{name}: a witnessed lie must be refuted");
+        }
+    }
+
+    #[test]
+    fn the_circuit_agrees_with_both_fixtures() {
+        // The recorded verdicts are what the circuit answers, so this
+        // checks the fixtures are current.
         let c = circuit_for_support();
         for (name, ins, want) in honest_div_vectors() {
-            assert_eq!(c.outputs(&c.eval(&ins))[0], want, "{name}");
+            assert_eq!(c.outputs(&c.eval(&ins))[0], want, "honest {name}");
+        }
+        for (name, ins, want) in bad_witness_vectors() {
+            assert_eq!(c.outputs(&c.eval(&ins))[0], want, "bad witness {name}");
         }
     }
 }
