@@ -185,100 +185,151 @@ mod tests {
         }
     }
 
+    /// One row of the comparison.
+    struct Setting {
+        name: String,
+        prover: usize,
+        verifier: usize,
+        transactions: u32,
+    }
+
+    impl Setting {
+        fn total(&self) -> usize {
+            self.prover + self.verifier
+        }
+    }
+
+    /// On-chain messages the search consumes, mirroring
+    /// `SearchMode::messages` in the emulator: a selection and a dissection
+    /// are separate messages in the asymmetric search and one message in
+    /// the full-duplex one, and both end with an adjudication message that
+    /// carries the trailing selection.
+    fn search_messages(rounds: u32, full_duplex: bool) -> u32 {
+        if full_duplex {
+            rounds + 1
+        } else {
+            2 * rounds + 1
+        }
+    }
+
+    /// How many of `rounds` stages each party dissects.  The full-duplex
+    /// search alternates; the asymmetric one gives every dissection to the
+    /// prover.
+    fn dissection_split(rounds: usize, full_duplex: bool) -> (usize, usize) {
+        if full_duplex {
+            (rounds.div_ceil(2), rounds / 2)
+        } else {
+            (rounds, 0)
+        }
+    }
+
     #[test]
     fn worst_case_weight_of_a_dispute_in_three_settings() {
         let midstate = measure_ots(20).weight();
         let digit = measure_ots(1).weight();
-        // The final trace a step adjudication commits: two reads with their
-        // last_step pointers, the pc read, the write, witness and memory
-        // witness.
         let final_trace_last_step = measure_ots(60).weight();
-        // Under Merkle memory the pointers go and two roots arrive: tau is
-        // 80 bytes (Definition 8.2).
         let tau_winternitz = measure_ots(80).weight();
 
-        // Setting 1 commits its dissections rather than publishing them, so
-        // the medium does not reach it.
-        let s1_prover = 70 * midstate + final_trace_last_step;
-        let s1_verifier = 10 * digit + measured_scripts::BITVMX_WORST_CHALLENGE;
+        let mut rows: Vec<Setting> = Vec::new();
 
-        println!("\n=== worst-case weight of one dispute, 2^30-step trace ===");
-        println!(
-            "{:<40} {:>11} {:>11} {:>11} {:>9}",
-            "setting", "prover WU", "verifier WU", "total WU", "% block"
-        );
+        // ---- BitVMX, dissections committed, nary = 8, ten rounds -------
+        for full_duplex in [false, true] {
+            let rounds = 10usize;
+            let per_round_hashes = 7usize; // nary - 1
+            let (p_stages, v_stages) = dissection_split(rounds, full_duplex);
+            // Whoever dissects at a stage also pays that stage's digit in
+            // the full-duplex search; in the asymmetric one the verifier
+            // pays every digit.
+            let (p_digits, v_digits) = if full_duplex {
+                (p_stages, v_stages)
+            } else {
+                (0, rounds)
+            };
+            let prover =
+                p_stages * per_round_hashes * midstate + p_digits * digit + final_trace_last_step;
+            let verifier = v_stages * per_round_hashes * midstate
+                + v_digits * digit
+                + measured_scripts::BITVMX_WORST_CHALLENGE;
+            rows.push(Setting {
+                name: format!(
+                    "BitVMX, {} (committed, nary=8)",
+                    if full_duplex { "full-duplex" } else { "today" }
+                ),
+                prover,
+                verifier,
+                // the search, plus the challenge transaction
+                transactions: search_messages(rounds as u32, full_duplex) + 1,
+            });
+        }
 
-        let row = |name: &str, p: usize, v: usize| {
-            println!(
-                "{:<40} {:>11} {:>11} {:>11} {:>8.2}%",
-                name,
-                p,
-                v,
-                p + v,
-                (p + v) as f64 / 4_000_000.0 * 100.0
-            );
-        };
-
-        println!("{}", "-".repeat(86));
-        row(
-            "1. BitVMX today (commits, no medium)",
-            s1_prover,
-            s1_verifier,
-        );
-
-        let mut totals = Vec::new();
+        // ---- compact: b = 192, four stages, always full-duplex ---------
         for medium in [Medium::Annex, Medium::OpReturn] {
-            // Settings 2 and 3 share a search: b = 192, four stages,
-            // full-duplex so each message carries both a selection and the
-            // next dissection, and the parties alternate.
+            let rounds = 4usize;
+            let (p_stages, v_stages) = dissection_split(rounds, true);
             let stage = medium.stage_publication() + digit;
-            let (prover_stages, verifier_stages) = (2usize, 2usize);
+            // An OP_RETURN dissection cannot ride on the stage transaction,
+            // so each published stage costs a StageData transaction too.
+            let extra_tx = match medium {
+                Medium::Annex => 0,
+                Medium::OpReturn => rounds as u32,
+            };
+            let search_tx = search_messages(rounds as u32, true) + extra_tx;
 
-            // Setting 2: the endgame is Script. tau is Winternitz-committed
-            // like everything else BitVMX commits.
-            let s2_prover = prover_stages * stage + tau_winternitz;
-            // A dispute ends in one challenge, so the worst case is the
-            // largest single script the verifier can be made to run.
-            let s2_verifier = verifier_stages * stage
-                + measured_scripts::MEMORY_NODE.max(measured_scripts::TRACE_HASH_MERKLE);
+            for garbled in [false, true] {
+                let (endgame_prover, endgame_verifier) = if garbled {
+                    (
+                        from_the_paper::ACW_TAU + medium.stage_publication(),
+                        from_the_paper::GARBLED_NODE_REFUTATION,
+                    )
+                } else {
+                    (
+                        tau_winternitz,
+                        measured_scripts::MEMORY_NODE.max(measured_scripts::TRACE_HASH_MERKLE),
+                    )
+                };
+                rows.push(Setting {
+                    name: format!(
+                        "compact, {} endgame [{}]",
+                        if garbled { "garbled" } else { "Script " },
+                        medium.name()
+                    ),
+                    prover: p_stages * stage + endgame_prover,
+                    verifier: v_stages * stage + endgame_verifier,
+                    // the search, plus the refutation transaction
+                    transactions: search_tx + 1,
+                });
+            }
+        }
 
-            // Setting 3: the endgame is a garbled circuit. tau is committed
-            // under ACW, and the proof and its working are published in the
-            // same medium as the dissections.
-            let endgame_published = medium.stage_publication();
-            let s3_prover = prover_stages * stage + from_the_paper::ACW_TAU + endgame_published;
-            let s3_verifier = verifier_stages * stage + from_the_paper::GARBLED_NODE_REFUTATION;
-
-            println!("{}", "-".repeat(86));
-            row(
-                &format!("2. compact, Script endgame [{}]", medium.name()),
-                s2_prover,
-                s2_verifier,
+        println!("\n| setting | prover WU | verifier WU | total WU | txs | % block |");
+        println!("|---|---:|---:|---:|---:|---:|");
+        for r in &rows {
+            println!(
+                "| {} | {} | {} | **{}** | {} | {:.2}% |",
+                r.name,
+                r.prover,
+                r.verifier,
+                r.total(),
+                r.transactions,
+                r.total() as f64 / 4_000_000.0 * 100.0
             );
-            row(
-                &format!("3. compact, garbled endgame [{}]", medium.name()),
-                s3_prover,
-                s3_verifier,
-            );
-            totals.push((medium, s2_prover + s2_verifier, s3_prover + s3_verifier));
         }
 
         println!("\nmeasured inputs:");
-        println!("  a 20-byte midstate, Winternitz HASH160 : {midstate} WU");
-        println!("  the same midstate in an annex           : 20 WU");
-        println!("  the same midstate in an OP_RETURN       : 80 WU");
-        println!("  one selection digit                     : {digit} WU");
-        println!("  the final trace under last_step (60 B)  : {final_trace_last_step} WU");
-        println!("  tau under Merkle memory (80 B), WOTS    : {tau_winternitz} WU");
+        println!("  20-byte midstate, Winternitz HASH160 : {midstate} WU");
+        println!("  the same in an annex                 : 20 WU");
+        println!("  the same in an OP_RETURN             : 80 WU");
+        println!("  one selection digit                  : {digit} WU");
+        println!("  final trace under last_step (60 B)   : {final_trace_last_step} WU");
+        println!("  tau under Merkle memory (80 B), WOTS : {tau_winternitz} WU");
 
-        let (_, annex2, annex3) = totals[0];
-        let (_, opret2, opret3) = totals[1];
-        println!(
-            "\nOP_RETURN over annex: setting 2 {:.2}x, setting 3 {:.2}x",
-            opret2 as f64 / annex2 as f64,
-            opret3 as f64 / annex3 as f64
+        // The full-duplex search moves cost rather than removing it.
+        assert_eq!(
+            rows[0].prover + rows[0].verifier,
+            rows[1].prover + rows[1].verifier,
+            "full-duplex halves the transactions and leaves the weight alone"
         );
-        assert!(s1_prover > annex2, "compact must beat what is deployed");
-        assert!(opret2 > annex2 && opret3 > annex3, "an output is dearer");
+        assert!(rows[1].transactions < rows[0].transactions);
+        assert!(rows[2].total() < rows[1].total());
     }
 }
