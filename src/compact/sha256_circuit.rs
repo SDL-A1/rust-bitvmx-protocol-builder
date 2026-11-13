@@ -209,9 +209,7 @@ pub fn rotr(w: &Word, n: usize) -> Word {
 /// Right shift, free except that the vacated bits are the zero wire.
 pub fn shr(w: &Word, n: usize, zero: usize) -> Word {
     let mut o = [zero; 32];
-    for i in n..32 {
-        o[i] = w[i - n];
-    }
+    o[n..32].copy_from_slice(&w[..(32 - n)]);
     o
 }
 
