@@ -31,9 +31,9 @@ pub mod memory;
 pub mod output;
 pub mod release;
 pub mod search;
+pub mod sha256_circuit;
 pub mod sha256_core;
 
 // Still out of the build: `compact_circuit_test` (18 tests), which needs
 // the endgame circuit rebuilt around the signature gadget rather than the
 // equality-gated release.
-

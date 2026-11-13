@@ -79,8 +79,19 @@ impl Interval {
     /// published, and publishing them would be the tree's mistake again.
     pub fn points(&self, b: usize) -> Vec<usize> {
         let step = self.len() / b;
-        assert!(step >= 1, "interval {:?} is too short to dissect into {}", self, b);
-        assert_eq!(self.len() % b, 0, "interval {:?} does not divide by {}", self, b);
+        assert!(
+            step >= 1,
+            "interval {:?} is too short to dissect into {}",
+            self,
+            b
+        );
+        assert_eq!(
+            self.len() % b,
+            0,
+            "interval {:?} does not divide by {}",
+            self,
+            b
+        );
         (1..b).map(|k| self.lo + k * step).collect()
     }
 
@@ -204,8 +215,7 @@ pub fn run(
             // The counterparty published at stage i-1; this sender selects.
             let prev = &stages[i - 2];
             let pts = prev.interval.points(b);
-            let published: Vec<State> =
-                pts.iter().map(|&t| trace(sender.other())[t]).collect();
+            let published: Vec<State> = pts.iter().map(|&t| trace(sender.other())[t]).collect();
             let own: Vec<State> = pts.iter().map(|&t| trace(sender)[t]).collect();
             let k = select(&published, &own);
             digits.push(k);
@@ -214,8 +224,7 @@ pub fn run(
         };
         // What this sender publishes: its own states at the interior
         // points of the interval it just selected into.
-        let own_states: Vec<State> =
-            iv.points(b).iter().map(|&t| trace(sender)[t]).collect();
+        let own_states: Vec<State> = iv.points(b).iter().map(|&t| trace(sender)[t]).collect();
         stages.push(Stage {
             index: i,
             sender,
@@ -234,7 +243,11 @@ pub fn run(
     let k = select(&published, &own);
     digits.push(k);
     let final_iv = last.interval.subinterval(b, k);
-    debug_assert!(final_iv.is_single_step(), "{:?} should be one step", final_iv);
+    debug_assert!(
+        final_iv.is_single_step(),
+        "{:?} should be one step",
+        final_iv
+    );
 
     Ok((
         stages,

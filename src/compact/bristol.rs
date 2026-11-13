@@ -184,6 +184,34 @@ impl Circuit {
     }
 
     /// Output `k` lives on this wire.  The first output is the top wire.
+    /// Serialize to Bristol fashion, the format [`Circuit::parse`] reads.
+    ///
+    /// A circuit that is built rather than loaded still has to be able to
+    /// leave the process -- to be handed to another implementation, or
+    /// checked in as a fixture -- and emitting it is also how the built
+    /// form is checked against the parsed one.
+    pub fn to_bristol(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("{} {}\n", self.gates.len(), self.n_wires));
+        out.push_str(&format!("1 {}\n", self.n_inputs));
+        out.push_str(&format!("1 {}\n", self.n_outputs));
+        out.push('\n');
+        for g in &self.gates {
+            match *g {
+                Gate::Xor { a, b, out: o } => {
+                    out.push_str(&format!("2 1 {a} {b} {o} XOR\n"));
+                }
+                Gate::And { a, b, out: o } => {
+                    out.push_str(&format!("2 1 {a} {b} {o} AND\n"));
+                }
+                Gate::Inv { a, out: o } => {
+                    out.push_str(&format!("1 1 {a} {o} INV\n"));
+                }
+            }
+        }
+        out
+    }
+
     pub fn output_wire(&self, k: usize) -> usize {
         self.n_wires - 1 - k
     }

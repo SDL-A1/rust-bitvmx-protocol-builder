@@ -139,9 +139,8 @@ fn two_pow() -> Vec<MaybeScalar> {
 /// two.  `two_pow_inv` builds it by repeated multiplication instead, and
 /// [`super::super::tests::compact_gsig_test`] checks `2 * HALF == 1`.
 const HALF: [u8; 32] = [
-    0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0x5D, 0x57, 0x6E, 0x73, 0x57, 0xA4, 0x50, 0x1D, 0xDF, 0xE9, 0x2F, 0x46,
-    0x68, 0x1B, 0x20, 0xA1,
+    0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x5D, 0x57, 0x6E, 0x73, 0x57, 0xA4, 0x50, 0x1D, 0xDF, 0xE9, 0x2F, 0x46, 0x68, 0x1B, 0x20, 0xA1,
 ];
 
 /// `(2^i)^-1 mod n`.
@@ -193,12 +192,7 @@ pub struct Affine {
 ///
 /// `g` is the garbling those wires belong to; only `label()` is used, so
 /// the gadget never touches the offset directly.
-pub fn garble(
-    tweak: &[u8],
-    g: &Garbled,
-    wires: &[usize],
-    key: &Affine,
-) -> GarbledSignature {
+pub fn garble(tweak: &[u8], g: &Garbled, wires: &[usize], key: &Affine) -> GarbledSignature {
     assert_eq!(wires.len(), MSG_BITS, "the gadget signs a 256-bit scalar");
     let p2 = two_pow();
     let mut c = Vec::with_capacity(MSG_BITS);
@@ -239,11 +233,7 @@ pub struct Evaluation {
 /// wrong garbling yields a scalar that simply fails verification, which is
 /// the same outcome as not evaluating at all -- so the gadget costs the
 /// evaluator nothing it was not already risking.
-pub fn evaluate(
-    tweak: &[u8],
-    sig: &GarbledSignature,
-    held: &[Label],
-) -> Evaluation {
+pub fn evaluate(tweak: &[u8], sig: &GarbledSignature, held: &[Label]) -> Evaluation {
     assert_eq!(held.len(), MSG_BITS);
     assert_eq!(sig.c.len(), MSG_BITS);
 

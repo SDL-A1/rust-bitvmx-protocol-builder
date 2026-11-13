@@ -12,15 +12,15 @@
 //! rests on -- that for *every* byte string an honest opponent can prove
 //! either an inclusion or a malformation -- is inherited, not rebuilt.
 
+use super::checkpoints::{packed_position, NODE_BYTES};
 use super::commitment::{
-    CONSTANT_TAIL, CONSTANT_TAIL_OFFSET, INPUT_INDEX_OFFSET, OUTPUT_DIGEST_OFFSET,
-    OUTPUT_FINAL_BLOCK_START, OUTPUT_PROFILE_BITCOUNT, PROFILE_BITCOUNT, SPEND_TYPE_OFFSET,
-    DIGEST_WINDOW_OFFSET, WINDOW_LEN,
+    CONSTANT_TAIL, CONSTANT_TAIL_OFFSET, DIGEST_WINDOW_OFFSET, INPUT_INDEX_OFFSET,
+    OUTPUT_DIGEST_OFFSET, OUTPUT_FINAL_BLOCK_START, OUTPUT_PROFILE_BITCOUNT, PROFILE_BITCOUNT,
+    SPEND_TYPE_OFFSET, WINDOW_LEN,
 };
 use super::flatmerkle::{verify_proof, Frame, Proof};
-use super::sha256_core::{compress, midstate_at, BLOCK_SIZE, STATE_SIZE};
-use super::checkpoints::{packed_position, NODE_BYTES};
 use super::search::State as Node;
+use super::sha256_core::{compress, midstate_at, BLOCK_SIZE, STATE_SIZE};
 use bitcoin::secp256k1::{schnorr, Message, Secp256k1, Verification, XOnlyPublicKey};
 
 // ---------------------------------------------------------------------

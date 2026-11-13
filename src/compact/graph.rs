@@ -149,10 +149,9 @@ impl Output {
             // Deliberately not `key`: the gadget's key is its own, and
             // reusing the protocol key here would let one signature serve
             // two purposes.
-            Leaf::GadgetRelease { key: g } => b
-                .push_x_only_key(g)
-                .push_opcode(OP_CHECKSIG)
-                .into_script(),
+            Leaf::GadgetRelease { key: g } => {
+                b.push_x_only_key(g).push_opcode(OP_CHECKSIG).into_script()
+            }
             _ => b
                 .push_x_only_key(key)
                 .push_opcode(OP_CHECKSIG)

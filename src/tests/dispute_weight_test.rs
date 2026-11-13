@@ -139,6 +139,10 @@ mod tests {
         pub const MEMORY_NODE: usize = 71_040;
         /// The state-hash check, which both settings need.
         pub const TRACE_HASH_MERKLE: usize = 70_256;
+        /// The same check under the `last_step` model, for the record:
+        /// the Merkle message is twenty bytes longer and the script sixty
+        /// bytes bigger.
+        #[allow(dead_code)]
         pub const TRACE_HASH_LAST_STEP: usize = 70_196;
     }
 
