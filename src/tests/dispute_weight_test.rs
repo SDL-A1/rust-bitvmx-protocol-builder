@@ -267,23 +267,40 @@ mod tests {
             let rounds = 4usize;
             let (p_stages, v_stages) = dissection_split(rounds, true);
             let stage = medium.stage_publication() + digit;
-            // An OP_RETURN dissection cannot ride on the stage transaction,
-            // so each published stage costs a StageData transaction too.
+            // Publications, and each needs a transaction of its own under
+            // OP_RETURN: the four stage dissections, and the endgame's proof
+            // and working. An output is part of the txid, so it cannot ride
+            // on a transaction that was pre-signed before its contents were
+            // known.
+            let publications = rounds as u32 + 1;
             let extra_tx = match medium {
                 Medium::Annex => 0,
-                Medium::OpReturn => rounds as u32,
+                Medium::OpReturn => publications,
             };
             let search_tx = search_messages(rounds as u32, true) + extra_tx;
 
             for garbled in [false, true] {
+                // Both endgames publish the multiproof *and the working it
+                // drives*. Neither can skip it: the three nodes a node check
+                // consumes have to be bound to something, and a multiproof
+                // alone binds only its own siblings -- finding C05. So the
+                // published file is common to the two, and only how the
+                // compression is checked differs.
+                let published = medium.stage_publication();
                 let (endgame_prover, endgame_verifier) = if garbled {
                     (
-                        from_the_paper::ACW_TAU + medium.stage_publication(),
+                        from_the_paper::ACW_TAU + published,
                         from_the_paper::GARBLED_NODE_REFUTATION,
                     )
                 } else {
                     (
-                        tau_winternitz,
+                        tau_winternitz + published,
+                        // NOTE: a floor, not a total. This is the blake3
+                        // compression alone. Binding the three nodes to the
+                        // published file needs a FlatMerkle opening checked
+                        // in Script as well, which is not built and so not
+                        // costed here. The garbled endgame does that opening
+                        // inside the circuit, where it is already paid for.
                         measured_scripts::MEMORY_NODE.max(measured_scripts::TRACE_HASH_MERKLE),
                     )
                 };
@@ -331,5 +348,7 @@ mod tests {
         );
         assert!(rows[1].transactions < rows[0].transactions);
         assert!(rows[2].total() < rows[1].total());
+        // Under OP_RETURN every publication costs a transaction of its own.
+        assert_eq!(rows[4].transactions, rows[2].transactions + 5);
     }
 }
