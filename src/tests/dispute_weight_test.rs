@@ -332,34 +332,36 @@ mod tests {
         // first compression. And the file's hash cannot be changed to
         // blake3, because BIP341 fixes the sighash it is bound by as
         // SHA-256.
-        {
+        //
+        // The radix is a dial: a wider bisection needs fewer rounds but
+        // commits `radix - 1` midpoints in each.  Radix 2 is the cheapest
+        // in weight; radix 3 lands on twelve transactions, which is what
+        // BitVMX full-duplex needs, and so compares the two at equal
+        // interaction.
+        let working_nodes = 92usize; // derived nodes at the deployed depth
+        for radix in [2usize, 3] {
             let rounds = 4usize; // the trace search, unchanged
             let (p_stages, v_stages) = dissection_split(rounds, true);
             let stage = Medium::Annex.stage_publication() + digit;
 
-            // The working at the deployed depth is 92 derived nodes, so
-            // locating one disagreement takes ceil(log2 92) = 7 rounds.
-            let bisection_rounds = 7usize;
-            // Each round commits one midpoint node, which Script has to
-            // read, so it is Winternitz and not published.
-            let per_round = midstate + digit;
-            let (p_bisect, v_bisect) = dissection_split(bisection_rounds, true);
+            let bisect_rounds = (working_nodes as f64).log(radix as f64).ceil() as usize;
+            // Each round commits `radix - 1` midpoint nodes, which Script
+            // has to read, so they are Winternitz and not published.
+            let per_round = (radix - 1) * midstate + digit;
+            let (p_bisect, v_bisect) = dissection_split(bisect_rounds, true);
 
-            // The final check: the disputed node's two children and the
-            // claimed parent, committed, and the blake3 script.
+            // The disputed node's two children and its claimed parent, by
+            // the party defending them; the script, by the challenger.
             let three_nodes = measure_ots(60).weight();
 
+            let txs = search_messages(rounds as u32, true)
+                + search_messages(bisect_rounds as u32, true)
+                + 1;
             rows.push(Setting {
-                name: "compact, Script endgame, bisected [annex]".to_string(),
-                prover: p_stages * stage + tau_winternitz + p_bisect * per_round,
-                verifier: v_stages * stage
-                    + v_bisect * per_round
-                    + three_nodes
-                    + measured_scripts::MEMORY_NODE,
-                // the trace search, the bisection, and the final check
-                transactions: search_messages(rounds as u32, true)
-                    + search_messages(bisection_rounds as u32, true)
-                    + 1,
+                name: format!("compact, Script endgame, bisected r={radix} [annex]"),
+                prover: p_stages * stage + tau_winternitz + p_bisect * per_round + three_nodes,
+                verifier: v_stages * stage + v_bisect * per_round + measured_scripts::MEMORY_NODE,
+                transactions: txs,
             });
         }
 
@@ -427,5 +429,25 @@ mod tests {
         assert!(rows[2].total() < rows[1].total());
         // Under OP_RETURN every publication costs a transaction of its own.
         assert_eq!(rows[4].transactions, rows[2].transactions + 5);
+
+        // The question the r=3 row exists to answer: at the same number of
+        // transactions BitVMX full-duplex needs, what does the Script
+        // endgame cost? Less than half, and less for each party
+        // separately -- so the Script endgame is not merely the
+        // garbled-free option, it is a real improvement on what BitVMX
+        // would be with a full-duplex search and no publication.
+        let bitvmx_fd = &rows[1];
+        let script_r3 = &rows[7];
+        assert_eq!(script_r3.transactions, bitvmx_fd.transactions, "12 each");
+        assert!(script_r3.total() * 2 < bitvmx_fd.total(), "less than half");
+        assert!(script_r3.prover < bitvmx_fd.prover);
+        assert!(script_r3.verifier < bitvmx_fd.verifier);
+        println!(
+            "\nat twelve transactions: Script endgame {} WU against BitVMX \
+             full-duplex {} WU -- {:.2}x",
+            script_r3.total(),
+            bitvmx_fd.total(),
+            bitvmx_fd.total() as f64 / script_r3.total() as f64
+        );
     }
 }
