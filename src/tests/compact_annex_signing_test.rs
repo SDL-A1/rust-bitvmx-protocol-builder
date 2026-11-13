@@ -197,4 +197,106 @@ mod tests {
             "and not the hash of the annex alone"
         );
     }
+
+    // --- and onto the wire --------------------------------------------
+
+    /// BIP341 takes the last witness element as the annex when there are
+    /// at least two and it begins with 0x50, so that is where it has to
+    /// sit and nowhere else.
+    #[test]
+    fn the_annex_is_the_last_witness_element() {
+        let a = annex_bytes(&publication(&dissection()));
+
+        // A script-path witness: signature, script, control block, annex.
+        let mut w = Witness::new();
+        w.push([0u8; 64]);
+        w.push([0x51u8]);
+        w.push([0u8; 33]);
+        w.push(&a);
+
+        assert_eq!(w.len(), 4);
+        assert_eq!(w.last().unwrap(), &a[..], "the annex is last");
+        assert_eq!(
+            w.taproot_annex(),
+            Some(&a[..]),
+            "and BIP341 reads it as the annex"
+        );
+        assert_eq!(
+            w.taproot_control_block().map(|c| c.len()),
+            Some(33),
+            "with the control block still found underneath it"
+        );
+    }
+
+    /// And it survives the wire. A node receives the transaction as
+    /// bytes, so the annex has to come back out of them unchanged.
+    #[test]
+    fn the_annex_survives_consensus_serialisation() {
+        let out = prevout();
+        let mut tx = spending(&out);
+        let sf = publication(&dissection());
+        let a = annex_bytes(&sf);
+
+        let mut w = Witness::new();
+        w.push([0u8; 64]);
+        w.push(&a);
+        tx.input[0].witness = w;
+
+        let bytes = bitcoin::consensus::serialize(&tx);
+        let back: Transaction = bitcoin::consensus::deserialize(&bytes).expect("a transaction");
+
+        assert_eq!(
+            back.input[0].witness.taproot_annex(),
+            Some(&a[..]),
+            "the annex comes back off the wire"
+        );
+        assert_eq!(
+            back.compute_txid(),
+            tx.compute_txid(),
+            "and does not move the txid, which is what lets the graph be pre-signed"
+        );
+    }
+
+    /// The property the whole pre-signed graph rests on: a segwit txid
+    /// does not cover the witness, so a stage's identity is fixed before
+    /// anyone knows what it will publish.
+    #[test]
+    fn what_a_stage_publishes_does_not_move_its_txid() {
+        let out = prevout();
+        let base = spending(&out);
+
+        let mut first = base.clone();
+        first.input[0].witness = {
+            let mut w = Witness::new();
+            w.push([0u8; 64]);
+            w.push(annex_bytes(&publication(&dissection())));
+            w
+        };
+
+        let mut other_states = dissection();
+        other_states[0][0] ^= 0xff;
+        let mut second = base.clone();
+        second.input[0].witness = {
+            let mut w = Witness::new();
+            w.push([0u8; 64]);
+            w.push(annex_bytes(&publication(&other_states)));
+            w
+        };
+
+        assert_ne!(
+            first.input[0].witness.taproot_annex(),
+            second.input[0].witness.taproot_annex(),
+            "two different dissections"
+        );
+        assert_eq!(
+            first.compute_txid(),
+            second.compute_txid(),
+            "but one txid, which is why the chain can be pre-signed"
+        );
+        assert_ne!(
+            first.compute_wtxid(),
+            second.compute_wtxid(),
+            "though the wtxid does move, as it must"
+        );
+    }
 }

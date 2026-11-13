@@ -843,6 +843,35 @@ impl Protocol {
             },
         };
 
+        Ok(Self::with_annex(witness, input)?)
+    }
+
+    /// Append the annex, if this input publishes one.
+    ///
+    /// BIP341 takes the last witness element as the annex when there are
+    /// at least two and it begins with `0x50`, so it goes after
+    /// everything else -- after the control block on a script path,
+    /// after the signature on a key path. It is stripped before the
+    /// stack the script runs on is formed, which is why a published
+    /// dissection costs no stack at all, and it is in the signature-hash
+    /// message, which is what makes it binding.
+    ///
+    /// Only taproot inputs may carry one: there is nowhere in a segwit
+    /// v0 witness for it to go and no consensus rule that would strip it.
+    fn with_annex(
+        mut witness: Witness,
+        input: &InputType,
+    ) -> Result<Witness, ProtocolBuilderError> {
+        let Some(annex) = input.annex() else {
+            return Ok(witness);
+        };
+        if !matches!(input.sighash_type(), SighashType::Taproot(..)) {
+            return Err(ProtocolBuilderError::InvalidAnnex);
+        }
+        if annex.first() != Some(&0x50) {
+            return Err(ProtocolBuilderError::InvalidAnnex);
+        }
+        witness.push(annex);
         Ok(witness)
     }
 
