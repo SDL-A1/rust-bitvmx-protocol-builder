@@ -126,6 +126,25 @@ pub fn unpack(elements: &[Vec<u8>], n: usize) -> Vec<Node> {
 /// some other publication listed.  Nothing lists this one.  The digest is
 /// what the stage's own signature commits to and that is the end of it.
 pub fn publication(states: &[Node]) -> StructuredFile {
+    publication_framed(states, FramedFor::Annex)
+}
+
+/// Which medium a publication is framed for.
+///
+/// The frame is not decoration: BIP341 hashes
+/// `compact_size(len) || annex` for an annex and the serialized `TxOut`
+/// for an output, so the file has to be preceded by exactly one
+/// 64-byte block of whichever header that medium uses, or its digest is
+/// not the thing the signature commits to. The two headers differ, so a
+/// file framed for one does not publish in the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FramedFor {
+    Annex,
+    Output,
+}
+
+/// A stage's publication, framed for the medium that will carry it.
+pub fn publication_framed(states: &[Node], medium: FramedFor) -> StructuredFile {
     let mut elements = pack(states);
     // FlatMerkle takes a power of two elements, at least four.  For every
     // `b` the cost model admits this is already true -- `feasible(b)` is
@@ -136,5 +155,9 @@ pub fn publication(states: &[Node]) -> StructuredFile {
     // build a publication for them at all.
     let want = elements.len().max(MIN_ELEMENTS).next_power_of_two();
     elements.resize(want, vec![0u8; BLOCK_SIZE]);
-    build(&elements, annex_frame(elements.len()))
+    let frame = match medium {
+        FramedFor::Annex => annex_frame(want),
+        FramedFor::Output => super::output::output_frame(want),
+    };
+    build(&elements, frame)
 }

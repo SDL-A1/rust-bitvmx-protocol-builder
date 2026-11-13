@@ -24,7 +24,9 @@
 
 use super::annex::compact_size;
 use super::flatmerkle::{total_raw_len, Frame, StructuredFile};
-use bitcoin::{Amount, ScriptBuf, TxOut};
+use bitcoin::absolute::LockTime;
+use bitcoin::transaction::Version;
+use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 
 const BLOCK_SIZE: usize = 64;
 /// One `OP_PUSHDATA4` bounds the body, so this layout covers `N` up to
@@ -102,3 +104,50 @@ pub fn publication_wu(n: usize) -> usize {
     let (p, h) = header_len(body);
     4 * (8 + p + h + body)
 }
+
+/// The transaction that carries a stage's dissection.
+///
+/// Two inputs and one output, and the shape is forced rather than chosen.
+///
+/// The publication is committed by a `SIGHASH_SINGLE` signature on input
+/// `0`, because that hash type signs the output at the signing input's
+/// own index -- so the dissection has to be output `0`, and the
+/// commitment is then `sha_single_output` over exactly the bytes
+/// [`txout_for`] lays down.
+///
+/// `SIGHASH_SINGLE` leaves the rest of the transaction open, so input
+/// `1` carries an ordinary `SIGHASH_ALL` signature and fixes the whole of
+/// it. One input with two `CHECKSIG`s in a leaf would be cheaper on chain
+/// and is deliberately not done: it puts both signatures in one witness,
+/// and the profile witness a dispute reads is then over a message whose
+/// length no longer identifies the spend.
+///
+/// Nothing is pre-signed against this transaction. Its `OP_RETURN` holds
+/// bytes decided at dispute time, so its txid is not known at setup --
+/// which is why the publication slot it spends carries the timeout rather
+/// than this transaction carrying anything downstream.
+pub fn data_transaction(slot: OutPoint, fee: OutPoint, sf: &StructuredFile) -> Transaction {
+    let input = |previous_output| TxIn {
+        previous_output,
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+        witness: Witness::new(),
+    };
+    Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        // Input 0 signs SIGHASH_SINGLE over output 0; input 1 pins the rest.
+        input: vec![input(slot), input(fee)],
+        output: vec![txout_for(sf)],
+    }
+}
+
+/// The index whose output a `SIGHASH_SINGLE` signature on this
+/// transaction commits to, and so where the publication must sit.
+pub const PUBLICATION_VOUT: usize = 0;
+
+/// The input that makes the commitment.
+pub const COMMITTING_INPUT: usize = 0;
+
+/// The input that pins the transaction.
+pub const PINNING_INPUT: usize = 1;
