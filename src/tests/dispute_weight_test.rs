@@ -318,6 +318,51 @@ mod tests {
             }
         }
 
+        // ---- compact, Script endgame, path bisected ------------------
+        // The alternative to publishing the working (Remark 9.6). Nothing
+        // is published for the memory argument at all, so nothing has to be
+        // opened: the parties bisect their own path computations until they
+        // reach the one node they disagree about, and that node's children
+        // and claimed parent are committed and checked.
+        //
+        // This is the only Script-native option. Opening a published
+        // FlatMerkle file in Script would take about fifteen SHA-256
+        // compressions at 213,758 script bytes each -- some 3.2 MB, over
+        // the standard transaction limit, and over the stack limit on the
+        // first compression. And the file's hash cannot be changed to
+        // blake3, because BIP341 fixes the sighash it is bound by as
+        // SHA-256.
+        {
+            let rounds = 4usize; // the trace search, unchanged
+            let (p_stages, v_stages) = dissection_split(rounds, true);
+            let stage = Medium::Annex.stage_publication() + digit;
+
+            // The working at the deployed depth is 92 derived nodes, so
+            // locating one disagreement takes ceil(log2 92) = 7 rounds.
+            let bisection_rounds = 7usize;
+            // Each round commits one midpoint node, which Script has to
+            // read, so it is Winternitz and not published.
+            let per_round = midstate + digit;
+            let (p_bisect, v_bisect) = dissection_split(bisection_rounds, true);
+
+            // The final check: the disputed node's two children and the
+            // claimed parent, committed, and the blake3 script.
+            let three_nodes = measure_ots(60).weight();
+
+            rows.push(Setting {
+                name: "compact, Script endgame, bisected [annex]".to_string(),
+                prover: p_stages * stage + tau_winternitz + p_bisect * per_round,
+                verifier: v_stages * stage
+                    + v_bisect * per_round
+                    + three_nodes
+                    + measured_scripts::MEMORY_NODE,
+                // the trace search, the bisection, and the final check
+                transactions: search_messages(rounds as u32, true)
+                    + search_messages(bisection_rounds as u32, true)
+                    + 1,
+            });
+        }
+
         println!("\n| setting | prover WU | verifier WU | total WU | txs | % block |");
         println!("|---|---:|---:|---:|---:|---:|");
         for r in &rows {
@@ -331,6 +376,38 @@ mod tests {
                 r.total() as f64 / 4_000_000.0 * 100.0
             );
         }
+
+        // Bisection radix is a dial: a wider bisection needs fewer rounds
+        // but commits r-1 midpoints in each.  Transactions bought with
+        // weight.
+        println!("\nbisecting the memory path, by radix (92 nodes of working):");
+        println!("| radix | rounds | nodes committed | endgame WU | total txs |");
+        println!("|---:|---:|---:|---:|---:|");
+        let working_nodes = 92f64;
+        for radix in [2usize, 3, 4, 8, 16, 92] {
+            let bisect_rounds = (working_nodes.ln() / (radix as f64).ln()).ceil() as usize;
+            let nodes = bisect_rounds * (radix - 1);
+            // Everything the endgame costs: tau, the bisection's committed
+            // midpoints and digits, the three nodes finally revealed, and
+            // the blake3 script that checks them.
+            let endgame = tau_winternitz
+                + nodes * midstate
+                + bisect_rounds * digit
+                + measure_ots(60).weight()
+                + measured_scripts::MEMORY_NODE;
+            let txs = search_messages(4, true) + search_messages(bisect_rounds as u32, true) + 1;
+            println!(
+                "| {} | {} | {} | {} | {} |",
+                radix, bisect_rounds, nodes, endgame, txs
+            );
+        }
+        println!(
+            "\nthe garbled endgame, for comparison: {} WU of endgame, {} txs",
+            from_the_paper::ACW_TAU
+                + Medium::Annex.stage_publication()
+                + from_the_paper::GARBLED_NODE_REFUTATION,
+            search_messages(4, true) + 1
+        );
 
         println!("\nmeasured inputs:");
         println!("  20-byte midstate, Winternitz HASH160 : {midstate} WU");
