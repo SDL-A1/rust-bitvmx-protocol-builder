@@ -145,6 +145,9 @@ pub enum ProtocolBuilderError {
     #[error("Transaction with name {0} missing in protocol {1}")]
     MissingTransaction(String, String),
 
+    #[error("An annex must begin with 0x50")]
+    InvalidAnnex,
+
     #[error("Transaction with name {0} does not contained output with index {1}")]
     MissingOutput(String, usize),
 

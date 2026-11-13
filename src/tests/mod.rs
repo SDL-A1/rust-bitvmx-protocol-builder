@@ -6,6 +6,7 @@ pub mod compact_fraud_test;
 pub mod compact_graph_test;
 pub mod compact_gadget_spend_test;
 pub mod compact_gsig_test;
+pub mod compact_annex_signing_test;
 pub mod compact_publish_test;
 pub mod compact_circuit_test;
 pub mod compact_dispute_test;

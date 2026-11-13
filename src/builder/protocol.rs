@@ -388,6 +388,7 @@ impl Protocol {
             &prevouts,
             spend_mode,
             tap_sighash_type,
+            input.annex(),
             key_manager,
             id,
         )?;
@@ -737,6 +738,7 @@ impl Protocol {
                             &prevouts,
                             input.spend_mode(),
                             tap_sighash_type,
+                            input.annex(),
                             key_manager,
                             id,
                         )?

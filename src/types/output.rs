@@ -2,7 +2,7 @@ use std::fmt;
 
 use bitcoin::{
     secp256k1::{self, Message},
-    sighash::{self, SighashCache},
+    sighash::{self, Annex, SighashCache},
     taproot::{LeafVersion, TaprootSpendInfo},
     Amount, EcdsaSighashType, PublicKey, ScriptBuf, TapLeafHash, TapSighashType, TapTweakHash,
     Transaction, TxOut, Txid, WScriptHash, XOnlyPublicKey,
@@ -202,6 +202,28 @@ pub enum OutputType {
     },
 }
 
+/// BIP342's default codeseparator position: none was executed.
+///
+/// The signature-hash message carries it whether or not the script uses
+/// `OP_CODESEPARATOR`, so it has to be supplied when the general
+/// signature-hash form is used in place of the script-spend convenience
+/// wrapper.
+const DEFAULT_CODESEPARATOR_POSITION: u32 = 0xFFFF_FFFF;
+
+/// Borrow an annex for signing.
+///
+/// `None` is the ordinary case and signs exactly as before. `Some` must
+/// begin with `0x50`, which is what makes it an annex rather than a
+/// witness element, and `Annex::new` is where that is enforced.
+fn as_annex(annex: Option<&[u8]>) -> Result<Option<Annex<'_>>, ProtocolBuilderError> {
+    match annex {
+        None => Ok(None),
+        Some(bytes) => Annex::new(bytes)
+            .map(Some)
+            .map_err(|_| ProtocolBuilderError::InvalidAnnex),
+    }
+}
+
 impl OutputType {
     pub fn taproot<V: Into<AmountType>>(
         value: V,
@@ -380,6 +402,13 @@ impl OutputType {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// `annex`, when present, is the BIP341 annex this input publishes.
+    ///
+    /// It is signed data: the annex is stripped before the script runs,
+    /// but its hash is in the signature-hash message, which is what makes
+    /// a published annex binding at all. An input that carries one and
+    /// signs without it would commit to nothing.
+    #[allow(clippy::too_many_arguments)]
     pub fn compute_taproot_sighash(
         &self,
         hasher: &mut SighashCache<&Transaction>,
@@ -388,6 +417,7 @@ impl OutputType {
         prevouts: &[TxOut],
         spend_mode: &SpendMode,
         tap_sighash_type: &TapSighashType,
+        annex: Option<&[u8]>,
         key_manager: &KeyManager,
         id: &str,
     ) -> Result<Vec<Option<Message>>, ProtocolBuilderError> {
@@ -405,6 +435,7 @@ impl OutputType {
                 internal_key,
                 leaves,
                 spend_mode,
+                annex,
                 key_manager,
                 id,
             )?,
@@ -561,6 +592,7 @@ impl OutputType {
         internal_key: &PublicKey,
         leaves: &[ProtocolScript],
         spend_mode: &SpendMode,
+        annex: Option<&[u8]>,
         key_manager: &KeyManager,
         id: &str,
     ) -> Result<Vec<Option<Message>>, ProtocolBuilderError> {
@@ -580,6 +612,7 @@ impl OutputType {
                 &key_path_sign_mode.unwrap(),
                 internal_key,
                 leaves,
+                annex,
                 key_manager,
                 id,
             )?;
@@ -600,6 +633,7 @@ impl OutputType {
                     tap_sighash_type,
                     leaf,
                     *leaf_index,
+                    annex,
                     key_manager,
                     id,
                 )?;
@@ -622,13 +656,18 @@ impl OutputType {
         tap_sighash_type: &TapSighashType,
         leaf: &ProtocolScript,
         leaf_index: usize,
+        annex: Option<&[u8]>,
         key_manager: &KeyManager,
         id: &str,
     ) -> Result<Option<Message>, ProtocolBuilderError> {
-        let hashed_message = Message::from(hasher.taproot_script_spend_signature_hash(
+        let hashed_message = Message::from(hasher.taproot_signature_hash(
             input_index,
             &sighash::Prevouts::All(prevouts),
-            TapLeafHash::from_script(leaf.get_script(), LeafVersion::TapScript),
+            as_annex(annex)?,
+            Some((
+                TapLeafHash::from_script(leaf.get_script(), LeafVersion::TapScript),
+                DEFAULT_CODESEPARATOR_POSITION,
+            )),
             *tap_sighash_type,
         )?);
 
@@ -657,13 +696,16 @@ impl OutputType {
         key_path_sign_mode: &SignMode,
         internal_key: &PublicKey,
         leaves: &[ProtocolScript],
+        annex: Option<&[u8]>,
         key_manager: &KeyManager,
         id: &str,
     ) -> Result<Option<Message>, ProtocolBuilderError> {
         // Compute a sighash for the key spend path.
-        let key_path_hashed_message = Message::from(hasher.taproot_key_spend_signature_hash(
+        let key_path_hashed_message = Message::from(hasher.taproot_signature_hash(
             input_index,
             &sighash::Prevouts::All(prevouts),
+            as_annex(annex)?,
+            None,
             *tap_sighash_type,
         )?);
 
