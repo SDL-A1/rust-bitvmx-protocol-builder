@@ -50,10 +50,22 @@ The engine already proves circuit correctness with a Nova recursive
 SNARK, and a step circuit is well inside the sizes it handles, so none
 of this is blocked.
 
-**The fixtures.**  Only A3's verdict circuit is checked in (251 kB).  The
-gated compression, which A1, A2, A4, B1, B2 and M1--M4 all reduce to, is
-3.7 MB in Bristol fashion and is not; nothing in the module is specific
-to either, and `emit.py` in the paper repository produces both.
+**The fixtures --- resolved.**  A3's verdict circuit is checked in
+(251 kB).  The gated compression, which A1, A2, A4, B1, B2, M1--M4 and
+Section 9.4's memory check all reduce to, is *built* rather than checked
+in: `sha256_circuit` constructs it and tests it against
+`sha256_core::compress`, which is `bitcoin_hashes` and therefore the
+compression Bitcoin computes.  It costs 22,696 AND gates, the paper's
+figure, reached the way the paper counts it.  3.7 MB of Bristol text was
+a poor thing to carry for a circuit the standard determines entirely;
+`Circuit::to_bristol` emits it if a fixture is ever wanted.
+
+`memory_node_circuit` is Section 9.4 on top of it --- left child, right
+child, claimed parent in, one verdict bit out, 22,856 AND gates --- and
+runs through `Endgame::setup`, `open` and `adjudicate`: a wrong node
+releases the secret byte for byte, an honest one releases nothing, and
+the published material is 762,144 bytes, which is the 0.73 MB the paper
+prices a compression at.
 
 ## 2. The step circuit is larger than the paper estimated
 
