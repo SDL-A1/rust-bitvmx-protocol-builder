@@ -83,7 +83,8 @@ fn nothing_straddles_a_slot() {
     ] {
         let t = memory::touched(p, 8_192, 24_575, regs);
         assert!(
-            !t.windows(2).any(|w| w[1] == w[0] + 1 && w[0] >= memory::REG_SLOTS),
+            !t.windows(2)
+                .any(|w| w[1] == w[0] + 1 && w[0] >= memory::REG_SLOTS),
             "a straddling pair outside the register block: {:?}",
             t
         );
