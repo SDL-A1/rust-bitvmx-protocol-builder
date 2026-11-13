@@ -5,8 +5,8 @@
 #[cfg(test)]
 mod tests {
     use crate::compact::memory::{
-        step_message_bytes, touched_words, MerkleMemory, Pattern, NODE, REG_SLOTS, REG_WORDS,
-        SLOT, SLOT_LEVELS, WORD, WORD_LEVELS,
+        step_message_bytes, touched_words, MerkleMemory, Pattern, NODE, REG_SLOTS, REG_WORDS, SLOT,
+        SLOT_LEVELS, WORD, WORD_LEVELS,
     };
     use std::collections::HashMap;
 
@@ -55,7 +55,10 @@ mod tests {
         let regs = [0usize, 7, 31];
         for p in [Pattern::Worst, Pattern::Alu, Pattern::Load, Pattern::Store] {
             let t = touched_words(p, 65_536, 196_607, regs);
-            let strays = t.windows(2).filter(|w| w[1] == w[0] + 1 && w[0] >= REG_WORDS).count();
+            let strays = t
+                .windows(2)
+                .filter(|w| w[1] == w[0] + 1 && w[0] >= REG_WORDS)
+                .count();
             assert_eq!(strays, 0, "{:?} built a straddling pair: {:?}", p, t);
         }
     }
@@ -74,7 +77,10 @@ mod tests {
 
     #[test]
     fn the_message_is_two_roots_a_pc_an_instruction_and_the_pairs() {
-        assert_eq!(step_message_bytes(WORD, 4), 2 * NODE + 4 + 4 + 4 * (4 + WORD));
+        assert_eq!(
+            step_message_bytes(WORD, 4),
+            2 * NODE + 4 + 4 + 4 * (4 + WORD)
+        );
     }
 
     // --- the multiproof ---------------------------------------------------

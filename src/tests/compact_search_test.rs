@@ -6,8 +6,8 @@
 #[cfg(test)]
 mod tests {
     use crate::compact::search::{
-        boundary, levels, published_states, run, select, Interval, Outcome, Party,
-        SearchError, State,
+        boundary, levels, published_states, run, select, Interval, Outcome, Party, SearchError,
+        State,
     };
 
     fn st(n: u8) -> State {
@@ -128,7 +128,13 @@ mod tests {
         for from in 1..=steps {
             let c = trace(steps, from, 200);
             let (_, out) = run(&p, &c, 8).expect("a dispute");
-            assert_eq!(out.step, from - 1, "diverging at {} isolates step {}", from, from - 1);
+            assert_eq!(
+                out.step,
+                from - 1,
+                "diverging at {} isolates step {}",
+                from,
+                from - 1
+            );
         }
     }
 
@@ -177,8 +183,7 @@ mod tests {
                 Party::Prover => &p,
                 Party::Challenger => &c,
             };
-            let want: Vec<State> =
-                st.interval.points(b).iter().map(|&t| own[t]).collect();
+            let want: Vec<State> = st.interval.points(b).iter().map(|&t| own[t]).collect();
             assert_eq!(
                 published_states(st, b),
                 want,
@@ -220,7 +225,10 @@ mod tests {
         // on the error rather than comparing the whole Result.
         match run(&p, &p, 8) {
             Err(SearchError::ResultsAgree) => {}
-            other => panic!("expected ResultsAgree, got {:?}", other.map(|(s, o)| (s.len(), o))),
+            other => panic!(
+                "expected ResultsAgree, got {:?}",
+                other.map(|(s, o)| (s.len(), o))
+            ),
         }
     }
 
@@ -233,8 +241,7 @@ mod tests {
     #[test]
     fn an_outcome_names_one_digit_per_level_plus_the_trailing_one() {
         let steps = 64;
-        let (_, out): (_, Outcome) =
-            run(&honest(steps), &trace(steps, 37, 200), 8).unwrap();
+        let (_, out): (_, Outcome) = run(&honest(steps), &trace(steps, 37, 200), 8).unwrap();
         assert_eq!(out.digits.len(), levels(steps, 8) as usize);
     }
 }

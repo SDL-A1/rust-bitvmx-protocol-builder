@@ -13,23 +13,21 @@ mod tests {
         publication, publication_framed, FramedFor, Node, NODE_BYTES,
     };
     use crate::compact::commitment::signing_message;
-    use crate::compact::output::{
-        self, COMMITTING_INPUT, PINNING_INPUT, PUBLICATION_VOUT,
-    };
+    use crate::compact::output::{self, COMMITTING_INPUT, PINNING_INPUT, PUBLICATION_VOUT};
     use bitcoin::hashes::{sha256, Hash};
     use bitcoin::key::Keypair;
     use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
     use bitcoin::sighash::Prevouts;
     use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder};
-    use bitcoin::{
-        Amount, OutPoint, ScriptBuf, TapSighashType, Transaction, TxOut, Witness,
-    };
+    use bitcoin::{Amount, OutPoint, ScriptBuf, TapSighashType, Transaction, TxOut, Witness};
     use bitcoin_scriptexec::{Exec, ExecCtx, Options, TxTemplate};
 
     /// A dissection of twelve interior states: the smallest feasible
     /// publication, four FlatMerkle elements.
     fn dissection() -> Vec<Node> {
-        (0..12u8).map(|i| [i.wrapping_mul(31); NODE_BYTES]).collect()
+        (0..12u8)
+            .map(|i| [i.wrapping_mul(31); NODE_BYTES])
+            .collect()
     }
 
     fn keys(byte: u8) -> (Secp256k1<bitcoin::secp256k1::All>, Keypair) {
@@ -230,8 +228,12 @@ mod tests {
         // An OP_RETURN with the right body but no frame, so the file
         // would not start on a block boundary.
         let bare = ScriptBuf::from_bytes(
-            [vec![0x6a, 0x4e], (sf.raw_bytes.len() as u32).to_le_bytes().to_vec(),
-             sf.raw_bytes.clone()].concat(),
+            [
+                vec![0x6a, 0x4e],
+                (sf.raw_bytes.len() as u32).to_le_bytes().to_vec(),
+                sf.raw_bytes.clone(),
+            ]
+            .concat(),
         );
         assert!(
             output::body_from_spk(&bare).is_none(),
@@ -261,7 +263,10 @@ mod tests {
         assert!(output::body_from_transaction(&tx).is_none());
 
         // And a transaction with no outputs publishes nothing.
-        let empty = Transaction { output: vec![], ..tx.clone() };
+        let empty = Transaction {
+            output: vec![],
+            ..tx.clone()
+        };
         assert!(output::body_from_transaction(&empty).is_none());
     }
 
@@ -298,9 +303,18 @@ mod tests {
         let sf = publication_framed(&dissection(), FramedFor::Output);
         assert!(elements_from_raw(&sf.raw_bytes, sf.n).is_some());
 
-        assert!(elements_from_raw(&sf.raw_bytes, sf.n * 2).is_none(), "wrong N");
-        assert!(elements_from_raw(&sf.raw_bytes, 3).is_none(), "N not a power of two");
-        assert!(elements_from_raw(&sf.raw_bytes, 2).is_none(), "N below the minimum");
+        assert!(
+            elements_from_raw(&sf.raw_bytes, sf.n * 2).is_none(),
+            "wrong N"
+        );
+        assert!(
+            elements_from_raw(&sf.raw_bytes, 3).is_none(),
+            "N not a power of two"
+        );
+        assert!(
+            elements_from_raw(&sf.raw_bytes, 2).is_none(),
+            "N below the minimum"
+        );
         assert!(
             elements_from_raw(&sf.raw_bytes[..sf.raw_bytes.len() - 1], sf.n).is_none(),
             "a truncated file is not a file"

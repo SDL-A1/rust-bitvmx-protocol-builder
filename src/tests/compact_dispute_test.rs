@@ -81,8 +81,11 @@ mod tests {
 
         // Diverged at stage 2: that is the witness, and the first one.
         assert_eq!(divergent_reference(&[3, 7, 2], &[3, 9, 2]), Some(2));
-        assert_eq!(divergent_reference(&[1, 7, 2], &[3, 9, 4]), Some(1),
-                   "the earliest divergence, not any of them");
+        assert_eq!(
+            divergent_reference(&[1, 7, 2], &[3, 9, 4]),
+            Some(1),
+            "the earliest divergence, not any of them"
+        );
     }
 
     /// The witness is two digits, so it costs two digits.  Compare M1,
@@ -93,8 +96,10 @@ mod tests {
         let digit_bits = selection_bits(192);
         assert_eq!(digit_bits, 8);
         // Two eight-bit digits against 222 bytes of M1 evidence.
-        assert!(2 * digit_bits as usize / 8 * 100 < 222,
-                "two digits must be far under M1's evidence");
+        assert!(
+            2 * digit_bits as usize / 8 * 100 < 222,
+            "two digits must be far under M1's evidence"
+        );
     }
 
     /// And it needs no garbled circuit: Script already verifies digits.
@@ -138,8 +143,15 @@ mod tests {
         // offset inside an element, and `packed_position` once added it
         // to one.
         assert_eq!(DIGEST_WINDOW_OFFSET, 2);
-        assert_eq!(DIGEST_WINDOW_OFFSET + WINDOW_LEN, 32, "to the end of the digest");
-        assert!(PER_ELEMENT * NODE_BYTES <= 64, "and three states fit a block");
+        assert_eq!(
+            DIGEST_WINDOW_OFFSET + WINDOW_LEN,
+            32,
+            "to the end of the digest"
+        );
+        assert!(
+            PER_ELEMENT * NODE_BYTES <= 64,
+            "and three states fit a block"
+        );
     }
 
     #[test]
@@ -165,8 +177,9 @@ mod tests {
     /// disagree with the packing for as long as there was no packing.
     #[test]
     fn pack_round_trips_through_packed_position() {
-        let states: Vec<checkpoints::Node> =
-            (0..11u8).map(|i| [i.wrapping_mul(17); NODE_BYTES]).collect();
+        let states: Vec<checkpoints::Node> = (0..11u8)
+            .map(|i| [i.wrapping_mul(17); NODE_BYTES])
+            .collect();
         let elements = checkpoints::pack(&states);
 
         assert_eq!(elements.len(), 11usize.div_ceil(PER_ELEMENT));

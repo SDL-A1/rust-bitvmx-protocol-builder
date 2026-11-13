@@ -9,16 +9,16 @@
 mod tests {
     use crate::compact::bristol::{Circuit, Gate};
     use crate::compact::garble::{evaluate as geval, Garbled, Label, LABEL_LEN};
-    use crate::compact::gsig::{
-        self, Affine, Signer, M4_SIG_TWEAK, MSG_BITS, SINGLE_EVALUATION,
-    };
+    use crate::compact::gsig::{self, Affine, Signer, M4_SIG_TWEAK, MSG_BITS, SINGLE_EVALUATION};
 
     /// A deterministic label source, so every test here is reproducible.
     fn labels(seed: u64) -> impl FnMut() -> Label {
         use bitcoin::hashes::{sha256, Hash};
         let mut n = seed;
         move || {
-            n = n.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            n = n
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let d = sha256::Hash::hash(&n.to_le_bytes()).to_byte_array();
             let mut l = [0u8; LABEL_LEN];
             l.copy_from_slice(&d[..LABEL_LEN]);
@@ -39,7 +39,11 @@ mod tests {
         let mut wires = Vec::new();
         for i in 0..MSG_BITS {
             let out = n_inputs + i;
-            gates.push(Gate::Xor { a: i, b: MSG_BITS, out });
+            gates.push(Gate::Xor {
+                a: i,
+                b: MSG_BITS,
+                out,
+            });
             wires.push(out);
         }
         let c = Circuit {
@@ -146,8 +150,8 @@ mod tests {
         let i = 137;
         let zero = g.label(wires[i], false);
         let one = g.label(wires[i], true);
-        let recovered = gsig::recover_key(M4_SIG_TWEAK, &sig, i, &zero, &one)
-            .expect("2^i is invertible");
+        let recovered =
+            gsig::recover_key(M4_SIG_TWEAK, &sig, i, &zero, &one).expect("2^i is invertible");
 
         assert_eq!(
             recovered,
@@ -168,9 +172,9 @@ mod tests {
     #[test]
     fn bit_order_round_trips() {
         let s = [
-            0x01u8, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x00, 0x11, 0x22, 0x33,
-            0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
-            0x0F, 0x1E, 0x2D, 0x3C, 0x4B, 0x5A, 0x69, 0x78,
+            0x01u8, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+            0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x0F, 0x1E, 0x2D, 0x3C,
+            0x4B, 0x5A, 0x69, 0x78,
         ];
         let b = gsig::scalar_bits(&s);
         assert_eq!(b.len(), MSG_BITS);

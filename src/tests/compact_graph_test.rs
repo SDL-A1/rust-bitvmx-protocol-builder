@@ -3,9 +3,9 @@
 #[cfg(test)]
 mod tests {
     use crate::compact::annex::annex_bytes;
+    use crate::compact::checkpoints::{publication, Node, NODE_BYTES};
     use crate::compact::commitment::{serialize_output, signing_message, PROFILE_LEN};
     use crate::compact::graph::{is_pinned, Graph, Leaf, Params, Role, TxNode};
-    use crate::compact::checkpoints::{publication, Node, NODE_BYTES};
     use bitcoin::hashes::Hash;
     use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
     use bitcoin::sighash::Prevouts;
@@ -367,8 +367,7 @@ mod tests {
             .iter()
             .filter(|n| {
                 n.tx.input.iter().any(|i| {
-                    i.previous_output.txid == target
-                        && i.previous_output.vout == vout as u32
+                    i.previous_output.txid == target && i.previous_output.vout == vout as u32
                 })
             })
             .map(|n| n.name.as_str())
@@ -400,7 +399,11 @@ mod tests {
             .filter(|n| n.name == "Dispute")
             .map(|n| n.name.as_str())
             .collect();
-        assert_eq!(disputes.len(), 1, "a second Dispute would be a second feeding");
+        assert_eq!(
+            disputes.len(),
+            1,
+            "a second Dispute would be a second feeding"
+        );
 
         // It offers exactly one output for the evaluation to consume.
         let d = g.get("Dispute");
@@ -584,10 +587,8 @@ mod tests {
         let (_, gk) = gadget_params();
         assert_ne!(key, gk, "the fixture is only meaningful with two keys");
 
-        let script = crate::compact::graph::Output::release_script(
-            &Leaf::GadgetRelease { key: gk },
-            &key,
-        );
+        let script =
+            crate::compact::graph::Output::release_script(&Leaf::GadgetRelease { key: gk }, &key);
         let bytes = script.as_bytes();
         assert_eq!(bytes.len(), 34, "<32-byte key> CHECKSIG");
         assert_eq!(bytes[0], 32, "a 32-byte push");
@@ -627,11 +628,13 @@ mod tests {
                 _ => None,
             })
             .expect("the default graph releases by preimage");
-        let gadget = crate::compact::graph::Output::release_script(
-            &Leaf::GadgetRelease { key: gk },
-            &key,
+        let gadget =
+            crate::compact::graph::Output::release_script(&Leaf::GadgetRelease { key: gk }, &key);
+        assert_eq!(
+            preimage.as_bytes().len(),
+            69,
+            "SHA256 <h_b> EQUALVERIFY <P> CHECKSIG"
         );
-        assert_eq!(preimage.as_bytes().len(), 69, "SHA256 <h_b> EQUALVERIFY <P> CHECKSIG");
         assert_eq!(gadget.as_bytes().len(), 34, "<P_g> CHECKSIG");
 
         // The witness each is spent with.  Both take one 64-byte Schnorr

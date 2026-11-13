@@ -138,14 +138,51 @@ mod tests {
 
     /// Figures from `compact2/python`, which models what never touches
     /// this repo: annex publication and garbled-circuit refutation.
+    /// Figures from `compact2/python`, which models what never touches
+    /// this repo: annex publication and garbled-circuit refutation.
     mod from_the_paper {
-        /// One stage's dissection, framed, in a Taproot annex.
-        pub const PUBLICATION: usize = 8_128;
-        /// The whole garbled-circuit endgame: tau committed under ACW
-        /// (4,16) plus the published proof and working.
-        pub const GARBLED_ENDGAME: usize = 29_530;
+        /// One stage's dissection, framed, in a Taproot annex. Witness, so
+        /// one weight unit a byte.
+        pub const PUBLICATION_ANNEX: usize = 8_128;
+        /// The same dissection in an `OP_RETURN` output. Non-witness, so
+        /// four weight units a byte.
+        pub const PUBLICATION_OPRETURN: usize = 32_512;
+        /// What an `OP_RETURN` stage costs beyond its payload: two outputs
+        /// on the stage, the data transaction's own inputs and overhead,
+        /// and the frame. An annex needs none of this -- it rides in the
+        /// stage transaction's own witness, which is the whole reason a
+        /// stage's txid stays fixed at setup.
+        pub const OPRETURN_FURNITURE: usize = 968;
+        /// tau committed under ACW (4,16).
+        pub const ACW_TAU: usize = 21_402;
         /// Refuting one node of the multiproof, in a circuit.
         pub const GARBLED_NODE_REFUTATION: usize = 11_357;
+    }
+
+    /// How a dissection reaches the chain.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Medium {
+        Annex,
+        OpReturn,
+    }
+
+    impl Medium {
+        fn name(&self) -> &'static str {
+            match self {
+                Medium::Annex => "annex",
+                Medium::OpReturn => "OP_RETURN",
+            }
+        }
+
+        /// What one stage's dissection costs, payload and furniture.
+        fn stage_publication(&self) -> usize {
+            match self {
+                Medium::Annex => from_the_paper::PUBLICATION_ANNEX,
+                Medium::OpReturn => {
+                    from_the_paper::PUBLICATION_OPRETURN + from_the_paper::OPRETURN_FURNITURE
+                }
+            }
+        }
     }
 
     #[test]
@@ -158,83 +195,90 @@ mod tests {
         let final_trace_last_step = measure_ots(60).weight();
         // Under Merkle memory the pointers go and two roots arrive: tau is
         // 80 bytes (Definition 8.2).
-        let tau = measure_ots(80).weight();
+        let tau_winternitz = measure_ots(80).weight();
 
-        // ---- setting 1: BitVMX as it stands ---------------------------
-        // nary = 8 over 2^30 steps is 10 rounds and 70 committed midstates
-        // (measured from NArySearchDefinition).
+        // Setting 1 commits its dissections rather than publishing them, so
+        // the medium does not reach it.
         let s1_prover = 70 * midstate + final_trace_last_step;
         let s1_verifier = 10 * digit + measured_scripts::BITVMX_WORST_CHALLENGE;
 
-        // ---- settings 2 and 3 share a search --------------------------
-        // b = 192, four stages, full-duplex so each message carries both a
-        // selection and the next dissection; the parties alternate.
-        let stage = from_the_paper::PUBLICATION + digit;
-        let (prover_stages, verifier_stages) = (2usize, 2usize);
-
-        // ---- setting 2: compact, Script endgame -----------------------
-        let s2_prover = prover_stages * stage + tau;
-        // A dispute ends in one challenge, not several, so the worst case
-        // is the largest single script the verifier can be made to run.
-        let s2_verifier = verifier_stages * stage
-            + measured_scripts::MEMORY_NODE.max(measured_scripts::TRACE_HASH_MERKLE);
-
-        // ---- setting 3: compact, garbled-circuit endgame --------------
-        // tau and the published file are inside GARBLED_ENDGAME.
-        let s3_prover = prover_stages * stage + from_the_paper::GARBLED_ENDGAME;
-        let s3_verifier = verifier_stages * stage + from_the_paper::GARBLED_NODE_REFUTATION;
-
-        let rows: [(&str, usize, usize); 3] = [
-            (
-                "1. BitVMX today (Winternitz, nary=8)",
-                s1_prover,
-                s1_verifier,
-            ),
-            (
-                "2. compact, blake3 endgame in Script",
-                s2_prover,
-                s2_verifier,
-            ),
-            ("3. compact, blake3 endgame garbled", s3_prover, s3_verifier),
-        ];
-
+        println!("\n=== worst-case weight of one dispute, 2^30-step trace ===");
         println!(
-            "
-=== worst-case weight of one dispute, 2^30-step trace ==="
-        );
-        println!(
-            "{:<38} {:>11} {:>11} {:>11} {:>9}",
+            "{:<40} {:>11} {:>11} {:>11} {:>9}",
             "setting", "prover WU", "verifier WU", "total WU", "% block"
         );
-        println!("{}", "-".repeat(84));
-        for (name, p, v) in rows {
+
+        let row = |name: &str, p: usize, v: usize| {
             println!(
-                "{:<38} {:>11} {:>11} {:>11} {:>8.2}%",
+                "{:<40} {:>11} {:>11} {:>11} {:>8.2}%",
                 name,
                 p,
                 v,
                 p + v,
                 (p + v) as f64 / 4_000_000.0 * 100.0
             );
-        }
-        println!(
-            "
-measured inputs:"
-        );
-        println!("  a 20-byte midstate, Winternitz HASH160 : {midstate} WU");
-        println!("  the same midstate published in an annex : 20 WU");
-        println!(
-            "  ratio                                   : {:.0}x",
-            midstate as f64 / 20.0
-        );
-        println!("  one base-192 selection digit            : {digit} WU");
-        println!("  the final trace under last_step (60 B)  : {final_trace_last_step} WU");
-        println!("  tau under Merkle memory (80 B)          : {tau} WU");
+        };
 
-        assert!(
-            s1_prover > s2_prover,
-            "compact must reduce the prover's side"
+        println!("{}", "-".repeat(86));
+        row(
+            "1. BitVMX today (commits, no medium)",
+            s1_prover,
+            s1_verifier,
         );
-        assert!(s3_prover + s3_verifier < s2_prover + s2_verifier);
+
+        let mut totals = Vec::new();
+        for medium in [Medium::Annex, Medium::OpReturn] {
+            // Settings 2 and 3 share a search: b = 192, four stages,
+            // full-duplex so each message carries both a selection and the
+            // next dissection, and the parties alternate.
+            let stage = medium.stage_publication() + digit;
+            let (prover_stages, verifier_stages) = (2usize, 2usize);
+
+            // Setting 2: the endgame is Script. tau is Winternitz-committed
+            // like everything else BitVMX commits.
+            let s2_prover = prover_stages * stage + tau_winternitz;
+            // A dispute ends in one challenge, so the worst case is the
+            // largest single script the verifier can be made to run.
+            let s2_verifier = verifier_stages * stage
+                + measured_scripts::MEMORY_NODE.max(measured_scripts::TRACE_HASH_MERKLE);
+
+            // Setting 3: the endgame is a garbled circuit. tau is committed
+            // under ACW, and the proof and its working are published in the
+            // same medium as the dissections.
+            let endgame_published = medium.stage_publication();
+            let s3_prover = prover_stages * stage + from_the_paper::ACW_TAU + endgame_published;
+            let s3_verifier = verifier_stages * stage + from_the_paper::GARBLED_NODE_REFUTATION;
+
+            println!("{}", "-".repeat(86));
+            row(
+                &format!("2. compact, Script endgame [{}]", medium.name()),
+                s2_prover,
+                s2_verifier,
+            );
+            row(
+                &format!("3. compact, garbled endgame [{}]", medium.name()),
+                s3_prover,
+                s3_verifier,
+            );
+            totals.push((medium, s2_prover + s2_verifier, s3_prover + s3_verifier));
+        }
+
+        println!("\nmeasured inputs:");
+        println!("  a 20-byte midstate, Winternitz HASH160 : {midstate} WU");
+        println!("  the same midstate in an annex           : 20 WU");
+        println!("  the same midstate in an OP_RETURN       : 80 WU");
+        println!("  one selection digit                     : {digit} WU");
+        println!("  the final trace under last_step (60 B)  : {final_trace_last_step} WU");
+        println!("  tau under Merkle memory (80 B), WOTS    : {tau_winternitz} WU");
+
+        let (_, annex2, annex3) = totals[0];
+        let (_, opret2, opret3) = totals[1];
+        println!(
+            "\nOP_RETURN over annex: setting 2 {:.2}x, setting 3 {:.2}x",
+            opret2 as f64 / annex2 as f64,
+            opret3 as f64 / annex3 as f64
+        );
+        assert!(s1_prover > annex2, "compact must beat what is deployed");
+        assert!(opret2 > annex2 && opret3 > annex3, "an output is dearer");
     }
 }

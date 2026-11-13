@@ -61,7 +61,11 @@ mod tests {
         let mut wires = Vec::new();
         for i in 0..MSG_BITS {
             let out = n_inputs + i;
-            gates.push(Gate::Xor { a: i, b: MSG_BITS, out });
+            gates.push(Gate::Xor {
+                a: i,
+                b: MSG_BITS,
+                out,
+            });
             wires.push(out);
         }
         (
