@@ -187,6 +187,54 @@ pub fn build(elements: &[Vec<u8>], frame: Frame) -> StructuredFile {
     sf
 }
 
+/// Which of a file's `2N - 2` items are data elements, in order.
+///
+/// `true` for a data element, `false` for a `MID` block. The layout is a
+/// function of `N` alone -- `build` emits two top-level blocks and each
+/// block is two halves followed by its own `MID` -- so a reader who knows
+/// `N` knows where every element is without being told.
+pub fn item_is_data(n: usize) -> Vec<bool> {
+    fn block(a: u32, out: &mut Vec<bool>) {
+        if a == 1 {
+            out.extend_from_slice(&[true, true, false]);
+        } else {
+            block(a - 1, out);
+            block(a - 1, out);
+            out.push(false);
+        }
+    }
+    let levels = n.trailing_zeros();
+    let mut out = Vec::with_capacity(2 * n - 2);
+    block(levels - 1, &mut out);
+    block(levels - 1, &mut out);
+    out
+}
+
+/// Read a file's data elements back out of its raw bytes.
+///
+/// The inverse of the layout [`build`] lays down, and what a party reads
+/// when a dissection reaches it as published data rather than as
+/// commitments: the publisher put `N` elements in, and this is how the
+/// counterparty gets them out knowing only `N`.
+///
+/// Returns `None` if the bytes are not a file of `N` elements at all,
+/// which is a malformation and a matter for the dispute rather than for
+/// a lenient reader.
+pub fn elements_from_raw(raw: &[u8], n: usize) -> Option<Vec<Vec<u8>>> {
+    if !n.is_power_of_two() || n < MIN_ELEMENTS || raw.len() != total_raw_len(n) {
+        return None;
+    }
+    let kinds = item_is_data(n);
+    debug_assert_eq!(kinds.len() * BLOCK_SIZE, raw.len());
+    let mut out = Vec::with_capacity(n);
+    for (i, is_data) in kinds.iter().enumerate() {
+        if *is_data {
+            out.push(raw[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE].to_vec());
+        }
+    }
+    (out.len() == n).then_some(out)
+}
+
 // ---------------------------------------------------------------------------
 // Inclusion proofs
 // ---------------------------------------------------------------------------

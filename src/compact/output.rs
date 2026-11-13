@@ -151,3 +151,53 @@ pub const COMMITTING_INPUT: usize = 0;
 
 /// The input that pins the transaction.
 pub const PINNING_INPUT: usize = 1;
+
+/// Recover the published file from the scriptPubKey carrying it.
+///
+/// The inverse of [`spk_for`], and deliberately strict: it accepts only
+/// the layout this protocol lays down, so a counterparty reading a
+/// dissection off the chain either gets the bytes the publisher framed
+/// or gets nothing. Anything else is a publication that did not happen,
+/// which is a matter for the profile dispute rather than for a lenient
+/// parser.
+pub fn body_from_spk(spk: &ScriptBuf) -> Option<Vec<u8>> {
+    let s = spk.as_bytes();
+    // OP_RETURN, fillers, OP_PUSHDATA4, a four-byte length, the body.
+    if s.first() != Some(&0x6a) {
+        return None;
+    }
+    let push = s.iter().position(|b| *b == 0x4e)?;
+    // Everything between OP_RETURN and the push must be filler.
+    if s[1..push].iter().any(|b| *b != 0x00) {
+        return None;
+    }
+    let len_at = push + 1;
+    let body_at = len_at + 4;
+    if s.len() < body_at {
+        return None;
+    }
+    let declared = u32::from_le_bytes(s[len_at..body_at].try_into().ok()?) as usize;
+    if s.len() != body_at + declared {
+        return None;
+    }
+    // And the header must be the one this body would have been given,
+    // which is what makes the file start exactly at byte 64 of the
+    // serialized output.
+    if s[..body_at] != script_header(declared)[..] {
+        return None;
+    }
+    Some(s[body_at..].to_vec())
+}
+
+/// Recover the published file from the transaction carrying it.
+///
+/// Reads the output a `SIGHASH_SINGLE` signature on the committing input
+/// would have signed, and no other: a publication is the output at that
+/// index or it is not a publication.
+pub fn body_from_transaction(tx: &Transaction) -> Option<Vec<u8>> {
+    let txout = tx.output.get(PUBLICATION_VOUT)?;
+    if txout.value != Amount::ZERO {
+        return None;
+    }
+    body_from_spk(&txout.script_pubkey)
+}

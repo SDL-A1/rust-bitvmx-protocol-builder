@@ -185,4 +185,144 @@ mod tests {
         }
         exec.result().expect("a result").success
     }
+
+    // --- the counterparty's side: reading the dissection back ---------
+
+    use crate::compact::checkpoints::{unpack, PER_ELEMENT};
+    use crate::compact::flatmerkle::{elements_from_raw, item_is_data, total_raw_len};
+
+    /// The whole round trip, which is what the medium has to deliver:
+    /// the states a stage dissected come back out of the transaction
+    /// that carried them, byte for byte, with nothing shared between the
+    /// two parties but the chain.
+    #[test]
+    fn a_dissection_survives_the_round_trip_through_a_transaction() {
+        let states = dissection();
+        let sf = publication_framed(&states, FramedFor::Output);
+        let tx = output::data_transaction(OutPoint::null(), OutPoint::null(), &sf);
+
+        let body = output::body_from_transaction(&tx).expect("a publication");
+        assert_eq!(body, sf.raw_bytes, "the file comes back whole");
+
+        // And the states come back out of the file. The reader knows
+        // only N, which the protocol fixes; everything else it works out
+        // from the layout.
+        let elements = elements_from_raw(&body, sf.n).expect("a file of N elements");
+        assert_eq!(elements, sf.elements, "the data elements, and only those");
+        let recovered = unpack(&elements, states.len());
+        assert_eq!(recovered, states, "every state, in order");
+    }
+
+    /// A reader accepts the layout this protocol lays down and nothing
+    /// else. What a publisher put somewhere else is a publication that
+    /// did not happen, which the profile dispute decides rather than a
+    /// lenient parser.
+    #[test]
+    fn a_reader_accepts_only_the_protocols_layout() {
+        let sf = publication_framed(&dissection(), FramedFor::Output);
+        let good = output::txout_for(&sf);
+
+        // Not an OP_RETURN at all.
+        let mut t = good.clone();
+        t.script_pubkey = ScriptBuf::from_bytes(vec![0x51]);
+        assert!(output::body_from_spk(&t.script_pubkey).is_none());
+
+        // An OP_RETURN with the right body but no frame, so the file
+        // would not start on a block boundary.
+        let bare = ScriptBuf::from_bytes(
+            [vec![0x6a, 0x4e], (sf.raw_bytes.len() as u32).to_le_bytes().to_vec(),
+             sf.raw_bytes.clone()].concat(),
+        );
+        assert!(
+            output::body_from_spk(&bare).is_none(),
+            "an unframed body is not a publication"
+        );
+
+        // A length that does not match the bytes present.
+        let mut truncated = good.script_pubkey.as_bytes().to_vec();
+        truncated.pop();
+        assert!(output::body_from_spk(&ScriptBuf::from_bytes(truncated)).is_none());
+
+        // Filler that is not filler.
+        let mut dirty = good.script_pubkey.as_bytes().to_vec();
+        dirty[1] = 0x01;
+        assert!(output::body_from_spk(&ScriptBuf::from_bytes(dirty)).is_none());
+    }
+
+    #[test]
+    fn a_publication_must_carry_no_value_and_sit_at_the_signed_index() {
+        let sf = publication_framed(&dissection(), FramedFor::Output);
+        let mut tx = output::data_transaction(OutPoint::null(), OutPoint::null(), &sf);
+        assert!(output::body_from_transaction(&tx).is_some());
+
+        // Value in the publication output would make it spendable-looking
+        // and is not what the frame's zero amount hashes.
+        tx.output[PUBLICATION_VOUT].value = Amount::from_sat(1);
+        assert!(output::body_from_transaction(&tx).is_none());
+
+        // And a transaction with no outputs publishes nothing.
+        let empty = Transaction { output: vec![], ..tx.clone() };
+        assert!(output::body_from_transaction(&empty).is_none());
+    }
+
+    /// Three states to a sixty-four byte element, which is what makes
+    /// 191 of them fill exactly 64 elements at the branching factor the
+    /// construction is for.
+    #[test]
+    fn the_packing_is_what_the_branching_factor_rests_on() {
+        assert_eq!(PER_ELEMENT, 3);
+        assert_eq!(NODE_BYTES, 20);
+        assert_eq!(191usize.div_ceil(PER_ELEMENT), 64);
+    }
+
+    /// The file is data elements interleaved with MID blocks, and which
+    /// is which is a function of N alone.
+    #[test]
+    fn the_layout_is_known_from_n_alone() {
+        for n in [4usize, 8, 16, 32, 64] {
+            let kinds = item_is_data(n);
+            assert_eq!(kinds.len(), 2 * n - 2, "N = {n}: 2N - 2 items");
+            assert_eq!(
+                kinds.iter().filter(|d| **d).count(),
+                n,
+                "N = {n}: N of them are data"
+            );
+            assert_eq!(kinds.len() * 64, total_raw_len(n));
+        }
+    }
+
+    /// A reader given the wrong N, or bytes that are not a file, gets
+    /// nothing rather than a plausible-looking answer.
+    #[test]
+    fn a_reader_refuses_what_is_not_a_file_of_n_elements() {
+        let sf = publication_framed(&dissection(), FramedFor::Output);
+        assert!(elements_from_raw(&sf.raw_bytes, sf.n).is_some());
+
+        assert!(elements_from_raw(&sf.raw_bytes, sf.n * 2).is_none(), "wrong N");
+        assert!(elements_from_raw(&sf.raw_bytes, 3).is_none(), "N not a power of two");
+        assert!(elements_from_raw(&sf.raw_bytes, 2).is_none(), "N below the minimum");
+        assert!(
+            elements_from_raw(&sf.raw_bytes[..sf.raw_bytes.len() - 1], sf.n).is_none(),
+            "a truncated file is not a file"
+        );
+    }
+
+    /// At the branching factor the construction is for.
+    #[test]
+    fn a_192_ary_dissection_round_trips() {
+        let states: Vec<Node> = (0..191u32)
+            .map(|i| {
+                let mut h = [0u8; NODE_BYTES];
+                h[..4].copy_from_slice(&i.to_le_bytes());
+                h
+            })
+            .collect();
+        let sf = publication_framed(&states, FramedFor::Output);
+        assert_eq!(sf.n, 64, "191 states fill 64 elements");
+
+        let tx = output::data_transaction(OutPoint::null(), OutPoint::null(), &sf);
+        let body = output::body_from_transaction(&tx).expect("a publication");
+        let elements = elements_from_raw(&body, sf.n).expect("a file");
+        assert_eq!(unpack(&elements, states.len()), states);
+    }
 }
