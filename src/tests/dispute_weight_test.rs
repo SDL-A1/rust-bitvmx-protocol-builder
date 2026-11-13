@@ -41,6 +41,12 @@ mod tests {
         }
     }
 
+    /// Public shim so the Argo comparison can reuse the measurement.
+    pub(super) fn measure_ots_pub(message_bytes: usize) -> (usize, usize) {
+        let m = measure_ots(message_bytes);
+        (m.weight(), m.digits)
+    }
+
     fn measure_ots(message_bytes: usize) -> Ots {
         let message = vec![0xabu8; message_bytes];
         let digits_len = message_digits_length(message.len());
@@ -448,6 +454,125 @@ mod tests {
             script_r3.total(),
             bitvmx_fd.total(),
             bitvmx_fd.total() as f64 / script_r3.total() as f64
+        );
+    }
+}
+
+/// What an Argo + Duty-Free Bits style claim costs on chain.
+///
+/// Argo ("Leaking a Secret from an Invalid Groth16 Proof", Eagen and Lai,
+/// 2026) verifies a Groth16 proof optimistically: the prover commits the
+/// proof on chain by revealing one garbled input label per proof bit, and
+/// a verifier who can decode an invalid proof publishes the secret it
+/// leaks.  Duty-Free Bits (Khambhati, Bhattacharya and Heath, 2026)
+/// projectivizes the garbling so those labels are small.
+///
+/// Duty-Free Bits is explicit about the on-chain mechanism: "E's garbled
+/// input must be authenticated on-chain via Lamport signatures ...
+/// projectivity is therefore not merely convenient, it is mandated by the
+/// on-chain authentication mechanism."  So the claim's weight is a Lamport
+/// commitment over the proof's bits, which this repository can measure
+/// directly.
+#[cfg(test)]
+mod argo_tests {
+    use key_manager::lamport::{HashFunction, Lamport, LamportType};
+
+    use crate::scripts::ots_checklamport;
+
+    /// Bits of a Groth16 proof over BN254: `A` and `C` in G1 and `B` in G2,
+    /// compressed to one coordinate and a sign bit each.
+    const GROTH16_PROOF_BITS: usize = 8 * (32 + 64 + 32);
+
+    fn lamport_claim(bits: usize, hash_type: LamportType) -> (usize, usize) {
+        let master = vec![0u8; 32];
+        let pk = Lamport {}
+            .generate_public_key(&master, hash_type, bits, 1)
+            .unwrap();
+        assert_eq!(pk.len(), bits, "one key pair a bit");
+        let script = ots_checklamport(&pk, false);
+        // One revealed preimage a bit, with its length prefix.
+        let witness = bits * (1 + hash_type.hash_size());
+        (script.len(), witness)
+    }
+
+    #[test]
+    fn what_an_argo_claim_costs_on_chain() {
+        println!("\nLamport authentication of a Groth16 proof's bits:");
+        println!(
+            "{:>26} {:>8} {:>10} {:>10} {:>10} {:>9}",
+            "hash", "bits", "script", "witness", "total WU", "WU/bit"
+        );
+        for (name, ht) in [
+            ("SHA256 (BitVMX default)", LamportType::SHA256),
+            ("HASH160", LamportType::HASH160),
+        ] {
+            let (script, witness) = lamport_claim(GROTH16_PROOF_BITS, ht);
+            let total = script + witness;
+            println!(
+                "{:>26} {:>8} {:>10} {:>10} {:>10} {:>9.1}",
+                name,
+                GROTH16_PROOF_BITS,
+                script,
+                witness,
+                total,
+                total as f64 / GROTH16_PROOF_BITS as f64
+            );
+        }
+        println!(
+            "\nArgo's own Table 1 reports the claim at ~56 kB and the \
+             disproof at ~200 B,"
+        );
+        println!("and says the on-chain flow is BitVM3's, which Argo does not change.");
+
+        let (s, w) = lamport_claim(GROTH16_PROOF_BITS, LamportType::HASH160);
+        assert!(s + w > 0);
+
+        // Argo's 56 kB works out at ~55 bytes a proof bit, which is a
+        // 20-byte-hash Lamport with a leaner script than this repository's
+        // -- ours pushes both hashes in full. The mechanism is the same and
+        // the order of magnitude agrees, so the comparison below uses
+        // Argo's own figure.
+        let argo_claim_wu = 56_000usize;
+        let argo_disproof_wu = 200usize;
+        assert!(
+            (s + w) as f64 / argo_claim_wu as f64 > 1.0,
+            "this repo's Lamport is the dearer of the two"
+        );
+
+        // What compact commits on a claim nobody disputes: the final step
+        // number and the final state hash.
+        let compact_claim = super::tests::measure_ots_pub(28).0;
+
+        println!("\n=== on chain, claim against dispute ===");
+        println!(
+            "{:<34} {:>12} {:>14} {:>6}",
+            "approach", "claim WU", "dispute WU", "txs"
+        );
+        println!(
+            "{:<34} {:>12} {:>14} {:>6}",
+            "Argo + Duty-Free Bits",
+            argo_claim_wu,
+            argo_claim_wu + argo_disproof_wu,
+            2
+        );
+        println!(
+            "{:<34} {:>12} {:>14} {:>6}",
+            "compact, garbled endgame [annex]", compact_claim, 75_379, 6
+        );
+        println!(
+            "{:<34} {:>12} {:>14} {:>6}",
+            "compact, Script bisected r=3", compact_claim, 177_515, 12
+        );
+        println!(
+            "{:<34} {:>12} {:>14} {:>6}",
+            "BitVMX today", compact_claim, 383_592, 22
+        );
+        println!(
+            "\nArgo pays its claim whether or not anyone disputes: the proof's \
+             bits are\ncommitted every time. Compact pays {} WU on an \
+             undisputed claim, {:.0}x less.",
+            compact_claim,
+            argo_claim_wu as f64 / compact_claim as f64
         );
     }
 }
