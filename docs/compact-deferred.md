@@ -142,7 +142,7 @@ the serialized output for its digest to be `sha_single_output` -- the
 output's analogue of the annex frame, bought with 49 bytes of `OP_0`
 fillers and an `OP_PUSHDATA4`.
 
-## 4. Deduplication is specified but not built
+## 4. Deduplication: the reference is built, the decision is not
 
 Several challengers selecting the same node can be answered once. The
 graph shape for it is settled -- a single stage transaction with one
@@ -151,6 +151,31 @@ so the chain is not broken -- and `compact_graph_test` checks that shape
 exists and that `StageDup` and the M5 dispute contend for `s_out` as
 intended. What is not built is the path that actually takes it: deciding
 when to deduplicate, and the pointer from the duplicate to the original.
+
+**The reference now exists.** `StageDup` spends two outputs, and the pair
+is the whole mechanism: a `Dedup` output of the stage being pointed at,
+whose spend is what consensus accepts as proof that the stage confirmed
+-- no signature can establish that, since a party can sign a stage and
+never broadcast it -- and the stage's own `s_out`, of fixed shape
+whatever the stage did, which `StageDispute` also wants. Only one of them
+can have it, so "no reference was made" is readable without anybody
+asserting it.
+
+Three tests pin it: a reference spends a `Dedup` and an `s_out`; the
+`Dedup` outputs are emitted whether or not anyone takes them, which is
+the standing charge Table 7.1's "shape" column prices; and a reference is
+told apart from a dispute by what it spent rather than by anybody's word.
+
+One graph is one instance, so the `Dedup` a `StageDup` spends here is its
+own stage's -- the right shape and a degenerate reference. A deployment
+takes it from another instance's stage.
+
+**What is still not built** is the decision: when to deduplicate, and the
+pointer that says *which* instance's stage is being referred to. That
+wants the multi-instance protocol state, and M6 of Section 7.3 -- the
+check that the instance referred to has the same digit prefix, and so the
+same interval -- is what makes a wrong pointer refutable. Neither is in
+the graph.
 
 It was left out on purpose. The construction's result is a publication
 cost, and deduplication is an optimisation on top of a cost that is

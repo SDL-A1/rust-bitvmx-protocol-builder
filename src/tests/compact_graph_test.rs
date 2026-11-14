@@ -314,6 +314,104 @@ mod tests {
         }
     }
 
+    /// A reference spends a `Dedup`, and that spend is the whole claim.
+    ///
+    /// Section 7.2: "I have already made this one elsewhere" is not a
+    /// claim the chain can check. Script cannot read another transaction,
+    /// and no signature helps, because a signature shows authorship and
+    /// never publication -- a party could sign a stage, never broadcast
+    /// it, and any verifier of that signature would be equally convinced.
+    /// What *can* be checked is a spend: if a transaction consumes an
+    /// output created by a stage, consensus has already established that
+    /// the stage confirmed.
+    #[test]
+    fn a_reference_spends_a_dedup_output() {
+        let (g, _, _) = graph();
+        for i in 1..=(g.params.levels as usize + 1) {
+            let dup = g.get(&format!("StageDup{i}"));
+            assert_eq!(
+                dup.spends.len(),
+                2,
+                "StageDup{i}: the reference and the fixed-shape output"
+            );
+            let roles: Vec<_> = dup
+                .spends
+                .iter()
+                .map(|(p, v)| g.get(p).outputs[*v].role.clone())
+                .collect();
+            assert!(
+                roles.iter().any(|r| matches!(r, Role::Dedup { .. })),
+                "StageDup{i} must spend a Dedup: {roles:?}"
+            );
+            assert!(
+                roles.iter().any(|r| matches!(r, Role::SOut(_))),
+                "StageDup{i} must spend the stage's s_out: {roles:?}"
+            );
+        }
+    }
+
+    /// The Dedup outputs are emitted whether anyone references or not,
+    /// which is the standing charge Table 7.1's "shape" column prices.
+    #[test]
+    fn dedup_outputs_are_emitted_and_mostly_unspent() {
+        let (g, _, _) = graph();
+        let emitted: usize = g
+            .nodes
+            .iter()
+            .map(|t| {
+                t.outputs
+                    .iter()
+                    .filter(|o| matches!(o.role, Role::Dedup { .. }))
+                    .count()
+            })
+            .sum();
+        let spent: usize = g
+            .nodes
+            .iter()
+            .flat_map(|t| t.spends.iter())
+            .filter(|(p, v)| matches!(g.get(p).outputs[*v].role, Role::Dedup { .. }))
+            .count();
+        assert!(emitted > 0, "stages emit Dedup outputs");
+        assert_eq!(
+            spent,
+            g.params.levels as usize + 1,
+            "one per stage, from its StageDup"
+        );
+        assert!(
+            emitted >= spent,
+            "a party pays for every other party's reference whether or not \
+             it is taken: {emitted} emitted, {spent} spent"
+        );
+    }
+
+    /// A reference is not a publication, and the graph says which is
+    /// which by what was spent rather than by anybody's word.
+    #[test]
+    fn publishing_and_referencing_are_told_apart_by_the_spend() {
+        let (g, _, _) = graph();
+        for i in 1..=(g.params.levels as usize + 1) {
+            let dup = g.get(&format!("StageDup{i}"));
+            let disp = g.get(&format!("StageDispute{i}"));
+            // Both want s_out, so at most one of them happens.
+            let s_of = |t: &TxNode| {
+                t.spends
+                    .iter()
+                    .find(|(p, v)| matches!(g.get(p).outputs[*v].role, Role::SOut(_)))
+                    .cloned()
+            };
+            assert_eq!(s_of(dup), s_of(disp), "StageDup{i} and StageDispute{i}");
+            // But only the reference spends a Dedup, so the two are not
+            // interchangeable.
+            let dedup_of = |t: &TxNode| {
+                t.spends
+                    .iter()
+                    .any(|(p, v)| matches!(g.get(p).outputs[*v].role, Role::Dedup { .. }))
+            };
+            assert!(dedup_of(dup), "the reference points at something");
+            assert!(!dedup_of(disp), "the dispute does not");
+        }
+    }
+
     #[test]
     fn only_the_endgame_dispute_takes_a_second_message() {
         let (g, _, _) = graph();

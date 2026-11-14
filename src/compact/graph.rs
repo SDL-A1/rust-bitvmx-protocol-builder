@@ -522,13 +522,33 @@ impl Graph {
                 None,
             );
 
-            // and the reference, when this party deduplicates
+            // and the reference, when this party deduplicates.
+            //
+            // Two inputs, and the pair is the whole mechanism. The first
+            // is a `Dedup` output of the stage being pointed at: spending
+            // it is what consensus accepts as proof that the stage
+            // confirmed, which no signature can establish -- a party can
+            // sign a stage and never broadcast it, and any verifier of
+            // that signature would be equally convinced. The second is
+            // the stage's own `s_out`, of fixed shape whatever the stage
+            // did, which is what `StageDispute` also wants: only one of
+            // them can have it, so "no reference was made" is readable
+            // without anybody asserting it.
+            //
+            // In a deployment the `Dedup` comes from another instance's
+            // stage. One graph is one instance, so here it is this
+            // stage's own, which is the right *shape* and a degenerate
+            // reference.
             let sd = format!("StageDup{i}");
+            let dedup_v = dedup_vout_of(&g, &name, 0);
             g.push(
                 secp,
                 key,
                 &sd,
-                vec![(name.clone(), sout_vout_of(&g, &name))],
+                vec![
+                    (name.clone(), dedup_v),
+                    (name.clone(), sout_vout_of(&g, &name)),
+                ],
                 vec![],
                 None,
             );
@@ -710,6 +730,16 @@ fn sel_vout_of(g: &Graph, name: &str) -> usize {
         .iter()
         .position(|o| matches!(o.role, Role::Selection(_)))
         .expect("a selection output")
+}
+
+/// The `Dedup(_, level, to)` output of `name`, which is what a
+/// reference spends.
+fn dedup_vout_of(g: &Graph, name: &str, to: usize) -> usize {
+    g.get(name)
+        .outputs
+        .iter()
+        .position(|o| matches!(o.role, Role::Dedup { to: t, .. } if t == to))
+        .expect("a Dedup output for that party")
 }
 
 fn sout_vout_of(g: &Graph, name: &str) -> usize {
