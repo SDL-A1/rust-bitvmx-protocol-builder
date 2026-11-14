@@ -30,6 +30,30 @@ pub const WORD: usize = 4;
 pub const SLOT_LEVELS: u32 = 15;
 pub const WORD_LEVELS: u32 = 18;
 
+/// Depth of the tree a deployment actually builds: one leaf per word of
+/// the 32-bit address space.
+///
+/// `WORD_LEVELS` is the paper's figure, over a megabyte. BitVMX puts its
+/// register file at `0xF000_0000` and its stack at `0xE000_0000`, so a
+/// tree over a contiguous megabyte cannot address either; see
+/// `bitvmx_cpu_definitions::memory_tree`, which is the tree that runs.
+pub const DEPLOYED_WORD_LEVELS: u32 = 30;
+
+/// The leaf width a tree of this depth is over.
+///
+/// The empty leaf is the hash of a leaf's worth of zeros, so it depends
+/// on the width: hashing a 32-byte zero slot in a word-granular tree
+/// builds a different tree from the one Definition 8.1 states. It changes
+/// no count below -- the empty value never affects how many siblings a
+/// proof carries -- but the roots would not be the protocol's roots.
+pub fn leaf_bytes(levels: u32) -> usize {
+    if levels == SLOT_LEVELS {
+        SLOT
+    } else {
+        WORD
+    }
+}
+
 /// A tree node, truncated like every other digest in the protocol.
 pub const NODE: usize = 20;
 
@@ -67,7 +91,12 @@ pub struct MerkleMemory {
 
 impl MerkleMemory {
     pub fn new(levels: u32, contents: &HashMap<usize, Vec<u8>>) -> Self {
-        let mut empty = vec![leaf_hash(&[0u8; SLOT])];
+        Self::with_leaf_bytes(levels, leaf_bytes(levels), contents)
+    }
+
+    /// A tree whose empty leaf is `width` zero bytes.
+    pub fn with_leaf_bytes(levels: u32, width: usize, contents: &HashMap<usize, Vec<u8>>) -> Self {
+        let mut empty = vec![leaf_hash(&vec![0u8; width])];
         for _ in 0..levels {
             let last = *empty.last().expect("seeded");
             empty.push(h(&last, &last));
@@ -276,4 +305,90 @@ pub fn touched_words(p: Pattern, pc: usize, data: usize, regs: [usize; 3]) -> Ve
 /// granularity it was four plus thirty-two.
 pub fn step_message_bytes(leaf: usize, leaves: usize) -> usize {
     2 * NODE + 4 + 4 + leaves * (4 + leaf)
+}
+
+/// The same vectors `bitvmx_cpu_definitions::memory_tree` pins, and that
+/// `compact2/python/memory.py` produces.
+///
+/// There are three implementations of this tree: the one the emulator
+/// runs, the model in the paper repository, and this one. Agreeing on
+/// node *counts* is not enough -- the empty leaf's width does not change
+/// a count but does change every root -- so they are pinned to concrete
+/// bytes here. A disagreement is a disagreement about the protocol, not
+/// about an opinion.
+#[cfg(test)]
+mod cross_check {
+    use super::*;
+
+    fn hex(n: &MemNode) -> String {
+        n.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn word_tree(contents: &[(usize, u32)]) -> MerkleMemory {
+        let map: HashMap<usize, Vec<u8>> = contents
+            .iter()
+            .map(|(i, w)| (*i, w.to_be_bytes().to_vec()))
+            .collect();
+        MerkleMemory::new(WORD_LEVELS, &map)
+    }
+
+    #[test]
+    fn the_zero_word_leaf() {
+        assert_eq!(
+            hex(&leaf_hash(&[0u8; WORD])),
+            "df3f619804a92fdb4057192dc43dd748ea778adc"
+        );
+        assert_ne!(
+            hex(&leaf_hash(&[0u8; SLOT])),
+            "df3f619804a92fdb4057192dc43dd748ea778adc",
+            "a zero slot is not a zero word, which is the whole point"
+        );
+    }
+
+    #[test]
+    fn the_empty_root_of_the_word_tree() {
+        assert_eq!(
+            hex(&word_tree(&[]).root()),
+            "bac77725f5cfaa5386da6723865ec4b4f0be00b5"
+        );
+    }
+
+    #[test]
+    fn a_populated_root() {
+        let t = word_tree(&[(0, 11), (31, 22), (65_536, 33), (196_607, 44)]);
+        assert_eq!(hex(&t.root()), "6f3f7354099b983e93c611cbc5dcd9a594e2609d");
+    }
+
+    #[test]
+    fn a_root_after_one_word_changes() {
+        let t = word_tree(&[(0, 11), (31, 0xcafe_babe), (65_536, 33), (196_607, 44)]);
+        assert_eq!(hex(&t.root()), "4a8bd32caa72513360aaeae9994e4a540358a327");
+    }
+
+    #[test]
+    fn the_leaf_width_follows_the_depth() {
+        assert_eq!(leaf_bytes(SLOT_LEVELS), SLOT);
+        assert_eq!(leaf_bytes(WORD_LEVELS), WORD);
+        assert_eq!(leaf_bytes(DEPLOYED_WORD_LEVELS), WORD);
+        // And the slot tree is unchanged: it really is over 32-byte slots.
+        let slot = MerkleMemory::new(SLOT_LEVELS, &HashMap::new());
+        let word = MerkleMemory::new(WORD_LEVELS, &HashMap::new());
+        assert_ne!(hex(&slot.root()), hex(&word.root()));
+    }
+
+    #[test]
+    fn a_path_still_verifies_after_the_change() {
+        let t = word_tree(&[(0, 11), (31, 22), (65_536, 33)]);
+        for (i, w) in [(0usize, 11u32), (31, 22), (65_536, 33)] {
+            let p = t.path(i);
+            assert!(t.verify(i, &w.to_be_bytes(), &p), "leaf {i}");
+            assert!(
+                !t.verify(i, &(w + 1).to_be_bytes(), &p),
+                "leaf {i} tampered"
+            );
+        }
+        // And an untouched leaf opens as the empty word.
+        let p = t.path(12_345);
+        assert!(t.verify(12_345, &0u32.to_be_bytes(), &p));
+    }
 }
